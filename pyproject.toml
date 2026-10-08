@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edacode"
+version = "0.1.0"
+description = "A small, inspectable interactive coding agent"
+requires-python = ">=3.10"
+dependencies = ["anthropic>=0.40", "python-dotenv>=1.0"]
+
+[project.optional-dependencies]
+openai = ["openai>=1.50"]
+
+[project.scripts]
+edacode = "edacode.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
