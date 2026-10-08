@@ -309,6 +309,8 @@ class Tools:
                   "after": digest(new), "mode": mode, "undone": False, "status": "prepared", "diff": diff}
         self.store.data["changes"].append(record)
         self.store.save()
+        # 本回合第一次真正写文件时，把回合起点的检查点落盘（同回合后续写入不再重复创建）。
+        self.store.commit_checkpoint(label=str(target.relative_to(self.root)), kind="auto")
         try:
             atomic_write(target, new, mode)
         except BaseException:
@@ -351,6 +353,46 @@ class Tools:
             self.store.save()
             return "已撤销：" + change["path"]
         return "没有可撤销的专用工具文件修改"
+
+    def restore_files(self, changes_len):
+        """回滚 ``changes[changes_len:]``；内容被外部改过的文件跳过而不是强行覆盖。
+
+        返回 ``(reverted, skipped)``，skipped 是 ``(path, 原因)``。
+        """
+        reverted, skipped = [], []
+        for change in reversed(self.store.data["changes"][changes_len:]):
+            if change["undone"] or change["status"] == "failed":
+                continue
+            try:
+                target = self.path(change["path"])
+            except (ValueError, PermissionError) as exc:
+                skipped.append((change["path"], f"路径不可用：{exc}"))
+                continue
+            try:
+                current = target.read_bytes() if target.is_file() else None
+            except OSError as exc:
+                skipped.append((change["path"], f"读取失败：{exc}"))
+                continue
+            if current is None and change["before"] is None:
+                change["undone"] = True
+                continue
+            if current is None or digest(current) != change["after"]:
+                skipped.append((change["path"], "内容在检查点后被外部修改"))
+                continue
+            try:
+                if change["before"] is None:
+                    target.unlink()
+                else:
+                    atomic_write(target, base64.b64decode(change["before"]), change["mode"])
+            except OSError as exc:
+                skipped.append((change["path"], f"回滚失败：{exc}"))
+                continue
+            change["undone"] = True
+            self.seen.pop(str(target), None)
+            self.read_seen.pop(str(target), None)
+            reverted.append(change["path"])
+        self.store.save()
+        return reverted, skipped
 
     def shell(self, command, timeout=120, background=False):
         if background:

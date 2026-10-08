@@ -12,17 +12,73 @@ python run.py --provider mock --workspace .
 
 # 使用现有 .env（ANTHROPIC_API_KEY、MODEL_ID，可选 ANTHROPIC_BASE_URL）
 python run.py --workspace .
-
-# 安装为 edacode 命令
-python -m pip install -e .
-edacode --workspace .
 ```
+
+### 装成全局命令（在任意目录下直接 `edacode`）
+
+想在别的项目文件夹里直接敲 `edacode` 唤醒，把它当 CLI 工具装一次即可。推荐用 `uv tool`（等价于 pipx，隔离环境 + 自动放进 PATH 上的 `~/.local/bin`）：
+
+```bash
+# editable：改源码即时生效，适合自己开发时用
+uv tool install --editable /path/to/edacode
+# 或者非 editable（把代码拷进工具环境，项目搬走也不受影响）
+uv tool install /path/to/edacode
+
+# 没有 uv 时用 pipx，或退回到某个已在 PATH 上的 Python
+pipx install --editable /path/to/edacode
+python -m pip install -e /path/to/edacode
+```
+
+装好后 `edacode` 落在 `~/.local/bin`（Windows）或同名用户 bin 目录，**当前目录就是工作区**：
+
+```bash
+cd ~/any/other/project
+edacode                  # 工作区 = 当前目录
+edacode -p "跑一下测试"   # 单次执行
+```
+
+配置查找顺序（`--env-file` 显式指定时只用那一份）：
+
+```text
+<当前目录>/.env      项目级，优先级最高
+~/.edacode/.env      用户级，全局兜底；任意目录下都能靠它拿到 key
+```
+
+所以把 key 放到 `~/.edacode/.env` 一次，之后在任何文件夹里 `edacode` 都能直接跑；某个项目想用不同的 key，在它自己的 `.env` 里覆盖即可。
+
+卸载：`uv tool uninstall edacode`（或 `pipx uninstall edacode`）。
 
 Windows 与 macOS/Linux 都支持：文件锁在 Windows 用 `msvcrt.locking`、在 POSIX 用 `fcntl.flock`；shell 工具优先探测 `bash`（Git for Windows / MSYS2），找不到才回退系统 shell；进程终止在 Windows 用 `taskkill /T`、在 POSIX 用 `killpg`。这些平台分支集中在 `src/edacode/compat.py`，可用 `EDACODE_SHELL` 指定 bash 路径。
 
 `edacode/.env.example` 是配置模板。也支持 OpenAI Chat Completions 兼容接口：安装 `pip install -e '.[openai]'`，设置 `EDACODE_PROVIDER=openai`、`OPENAI_API_KEY` 和 `EDACODE_MODEL`。
 
 会话状态默认保存在 `~/.edacode/projects/<workspace-hash>/sessions/`，可以用 `--resume` 或 `--resume latest` 继续。状态目录不写进项目，避免把密钥、对话和运行日志误提交。
+
+## 界面
+
+启动后是 opencode 风格的欢迎屏：方块像素 logo、带左侧色条的输入框、模式/模型行、快捷键提示、Tip，以及底部状态栏（工作区、MCP 数量、版本）。
+
+```text
+                    █████      █  █████  █████  █████      █  █████
+                    █   █  █████      █  █      █   █  █████  █   █
+                    █████  █   █  █████  █      █   █  █   █  █████
+                    █      █   █  █   █  █      █   █  █   █  █    
+                    █████  █████  █████  █████  █████  █████  █████
+
+    ┃  随便说点什么…  "修复 src 里的 TODO"
+    ┃  Edit  claude-opus-4-6  anthropic
+
+                                     /help 命令    /mode 切换权限    Ctrl-C 退出
+
+    ● Tip 输入 @路径 可以注入文件内容或目录清单
+
+ ~/proj  ● 2 MCP  /status                                              0.1.0
+```
+
+- 只用标准库 + ANSI 转义序列，**不引入 TUI 框架**：在 cmd / PowerShell / Windows Terminal / Git Bash(mintty) / macOS / Linux 上都稳定，不需要 winpty。
+- 模式用颜色区分（Plan 青 / Ask 黄 / Edit 蓝 / Auto 绿）；正文用 16 色 ANSI，跟随终端主题；只有 logo 的竖向渐变是 256 色灰度，针对深色终端调优。
+- 非 tty（管道、重定向）或设置了 `NO_COLOR` 时**自动降级为纯文本**，`python run.py ... > out.txt` 不会混入转义码。
+- `--no-banner` 跳过欢迎屏，只打印一行启动信息，脚本里更清爽。
 
 ## 交互方式
 
@@ -39,6 +95,8 @@ Windows 与 macOS/Linux 都支持：文件锁在 Windows 用 `msvcrt.locking`、
 /sessions
 /mcp
 /commands list|reload
+/checkpoint [标签]
+/restore [ID|latest]
 /compact
 /quit
 ```
@@ -87,6 +145,22 @@ argument-hint: <path>
 - 外部工具定义**不等于**授权：`plan` 模式拒绝，`ask`/`edit` 模式逐次审批，`auto` 才自动执行。
 - 单个 server 启动失败只记录到 `/mcp`，不影响内置工具和其他 server。
 
+## 检查点与回滚
+
+EdaCode 在每个用户回合开始时自动打一个检查点，把"文件 + 对话 + 计划 + Goal"绑在同一个时间点上。和 Gemini CLI 不同，它**不依赖影子 Git 仓库**，而是复用文件编辑时已经记录的改动前镜像（`changes[].before`）：
+
+```text
+/checkpoint 重构前      手动打一个带标签的检查点
+/restore latest         回滚到最近一次检查点
+/restore <ID>           回滚到指定检查点（ID 见 /status）
+```
+
+- 一个检查点记录四样东西：对话长度 `messages_len`、压缩代数 `generation`、`todos`、`goal`，以及改动条数 `changes_len`。回滚时按这些锚点恢复，而不是复制整份消息体。
+- **文件回滚**：把检查点之后被改动或新建的文件还原/删除。若某文件在检查点之后被**外部**改过（当前内容与 EdaCode 记录的 after 哈希不一致），则跳过并在结果里列出，不覆盖主人的手改。
+- **对话回滚**：截断到 `messages_len`。如果期间发生过上下文压缩（`generation` 变了），或当前历史比检查点还短，就**拒绝回滚对话**，只回滚文件，避免把压缩后的历史截错。
+- 检查点按时间保留最近 `CHECKPOINT_KEEP`（30）个，自动淘汰更旧的。
+- `/clear` 会一并清空检查点。
+
 ## 已实现的核心
 
 - Anthropic Messages API 和 OpenAI 兼容接口的 provider 适配；网络/限流错误只在没有输出或工具执行前重试。
@@ -99,8 +173,11 @@ argument-hint: <path>
 - `delegate` 只读调查子 agent，以及独立 Goal 判断器；Goal 未完成时自动继续，达到 `max_turns` 后把控制权交还用户。
 - 外部 MCP（stdio）工具接入：`mcp.json` 配置、握手、工具发现与调用，命名空间隔离且默认需要审批。
 - 自定义斜杠命令（Markdown，项目/用户两级）与 `@文件` / `!{命令}` 上下文注入；shell 注入复用同一套审批。
+- 回合级检查点与 `/restore`：文件、对话、计划、Goal 一起回滚，不依赖 Git；外部改过的文件跳过不覆盖。
 - glob 语义正确：`**` 递归、`*` 不跨目录，`src/**/*.py` 这类 pattern 在 Windows 上也匹配。
 - 跨平台：文件锁、shell 探测、进程树终止在 Windows 与 POSIX 上都可用，平台分支集中在 `compat.py`。
+- 可装成全局 CLI（`uv tool install` / `pipx` / `pip install -e`），在任意目录下 `edacode` 直接以当前目录为工作区；配置按 `<当前目录>/.env` → `~/.edacode/.env` 回退，key 放全局一次即可到处用。
+- opencode 风格终端界面：方块像素 logo、带色条的输入框、模式/模型行、底部状态栏；纯 ANSI 实现、无 TUI 依赖，非 tty 或 `NO_COLOR` 时自动降级为纯文本。
 - `--provider mock` 离线冒烟路径，方便在没有模型和密钥时验证文件、会话和工具边界。
 
 这不是操作系统级沙箱。Bash 仍以当前用户身份运行在工作区目录；`auto` 只适合你信任的项目。需要更强隔离时应在容器、虚拟机或 Codex/Gemini 等自带 sandbox 中运行。
@@ -138,6 +215,7 @@ EdaCode 采纳的是可解释的机制，而不是照搬实现：
 | 只读调查子 agent | OpenCode / Qwen | `delegate`（独立 Store、只读工具集） |
 | 自定义命令 + 上下文注入 | Gemini CLI / Qwen Code | `commands.py`（`$ARGUMENTS`、`@{path}`、`!{cmd}`、`:` 命名空间） |
 | `@` 文件引用 | Gemini CLI | `commands.inject_references` |
+| 回合级 checkpoint / restore | Gemini CLI | `storage.py`（复用 `changes[].before`，不依赖 Git） |
 | MCP 外部工具 | Gemini / Qwen / Codex | `mcp.py`（stdio，命名空间 + 审批） |
 | 独立 Goal 判断器 | 课程 17.py / ZCode「验证后再结束」 | `GoalEvaluator` |
 | mock provider + headless JSON | ZCode | `--provider mock`、`--json -p` |
@@ -149,14 +227,20 @@ EdaCode 采纳的是可解释的机制，而不是照搬实现：
 在项目目录下执行（Windows 的 Git Bash 与 macOS/Linux 通用）：
 
 ```bash
-# 全部单元测试（含会话锁、shell、进程超时、MCP 端到端、自定义命令与 @ 引用）
+# 全部单元测试（含会话锁、shell、进程超时、MCP 端到端、自定义命令与 @ 引用、配置回退、界面渲染）
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests -v
+
+# 界面预览：管道模式下会自动降级为纯文本
+printf '/quit\n' | python run.py --provider mock --workspace . --no-stream
 
 # 离线冒烟：单次执行 + JSON 输出
 python run.py --provider mock --workspace . --json -p "列出当前文件"
 
 # 离线冒烟：交互命令流
 printf '/status\n/mcp\n/commands list\n/tools\n/quit\n' | python run.py --provider mock --workspace . --no-stream
+
+# 全局命令验证：换到无关目录仍能启动（先装好 uv tool install --editable）
+cd /tmp && edacode --version && edacode -p "只回答一个数字：6 乘以 7 等于多少"
 ```
 
 ## 目录
@@ -165,9 +249,11 @@ printf '/status\n/mcp\n/commands list\n/tools\n/quit\n' | python run.py --provid
 edacode/
   run.py                  # 源码 checkout 直接运行
   pyproject.toml          # 可编辑安装和 edacode 命令
+  LICENSE                 # MIT
   .env.example
   src/edacode/
     cli.py                # REPL 和 slash 命令
+    ui.py                 # opencode 风格欢迎屏、状态栏、配色与降级
     config.py             # provider、模式、上限配置
     compat.py             # 文件锁 / shell 探测 / 进程树终止的平台分支
     providers.py          # Anthropic/OpenAI/mock
@@ -178,7 +264,7 @@ edacode/
     mcp.py                # 外部 MCP stdio 客户端
     permissions.py        # policy gate
     processes.py          # 进程组和后台 job
-    storage.py            # snapshot、events、artifact、锁
+    storage.py            # snapshot、checkpoint、events、artifact、锁
   tests/
     test_edacode.py       # 单元与端到端测试
     mcp_echo_server.py    # 测试用的最小 MCP server
@@ -189,11 +275,15 @@ edacode/
 
 ## 当前边界
 
-已实现：stdio MCP、自定义命令与 `@` / `!{}` 注入、Windows/POSIX 跨平台。
+已实现：stdio MCP、自定义命令与 `@` / `!{}` 注入、回合级 checkpoint/restore、Windows/POSIX 跨平台。
 
 未实现（保留边界，避免把"有一个同名工具"误报成完整功能）：
 
-- checkpoint / restore：Gemini CLI 那种"文件 + 对话一起回滚"依赖影子 Git 仓库，与"不自动操作 Git"的边界冲突，需要先定协议。
 - `10.py` 的依赖任务图、`12.py` 的 Cron、`13.py` 的多队友 worktree、`15.py` 的完整集成：都需要独立生命周期和更严格的审批测试。
 - MCP 只做了 stdio，HTTP/SSE transport 未实现。
+- checkpoint/restore 只覆盖 EdaCode 自己写过的文件；通过 shell 命令（`git`、脚本、外部编辑器）造成的改动不在快照里，`/restore` 不会还原它们。
 - 没有 OS 级沙箱：`auto` 模式下 shell 以当前用户身份运行在工作区目录，只适合信任的项目。需要更强隔离时应在容器、虚拟机或自带 sandbox 的 agent 中运行。
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。

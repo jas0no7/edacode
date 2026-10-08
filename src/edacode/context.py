@@ -80,6 +80,8 @@ def compact(engine, force=False, budget=None):
               + f"\n完整记录可用 read_artifact 读取：{archive}")
     messages[:] = [{"role": "user", "content": marker}] + [m for group in tail for m in group]
     assert_protocol(messages)
+    # 历史被重写，旧检查点不能再按 messages_len 截断回滚对话。
+    engine.store.data["generation"] = engine.store.data.get("generation", 0) + 1
     engine.store.event("context_compact", before=len(original), after=len(serialized(messages)), artifact=archive)
     engine.store.save()
     engine.display("info", "较早上下文已归档；完整记录可以按需恢复。")

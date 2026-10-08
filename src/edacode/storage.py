@@ -1,4 +1,5 @@
 """原子快照 + 审计事件；恢复时不会自动重新执行未确认完成的副作用。"""
+import copy
 import hashlib
 import json
 import os
@@ -10,6 +11,8 @@ import time
 import uuid
 
 from .compat import lock_file, unlock_file
+
+CHECKPOINT_KEEP = 30
 
 
 def encode(value):
@@ -92,7 +95,8 @@ class Store:
             else:
                 self.data = {"version": 1, "id": self.id, "workspace": str(config.workspace),
                              "title": "", "messages": [], "todos": [], "goal": None,
-                             "usage": {"input": 0, "output": 0}, "changes": [], "updated": time.time()}
+                             "usage": {"input": 0, "output": 0}, "changes": [],
+                             "generation": 0, "checkpoints": [], "updated": time.time()}
             self.save()
         except BaseException:
             self.close()
@@ -108,6 +112,63 @@ class Store:
             handle.write(json.dumps({"time": time.time(), "type": kind, **data}, ensure_ascii=False) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+
+    def begin_checkpoint(self):
+        """在回合起点记录一个快照点；只有真的发生文件改动时才 commit 落盘。
+
+        检查点不复制消息正文，只记录 ``messages_len`` 与 ``generation``：会话历史是追加的，
+        回滚就是截断。``generation`` 在上下文压缩重写历史时递增，用来判断旧检查点是否还能回滚对话。
+        """
+        self._pending = {
+            "time": time.time(),
+            "generation": self.data.get("generation", 0),
+            "messages_len": len(self.data["messages"]),
+            "todos": copy.deepcopy(self.data["todos"]),
+            "goal": copy.deepcopy(self.data["goal"]),
+            "changes_len": len(self.data["changes"]),
+        }
+
+    def commit_checkpoint(self, label="", kind="auto"):
+        pending = getattr(self, "_pending", None)
+        if not pending:
+            return None
+        self._pending = None
+        entry = {"id": time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
+                 "label": label or ("自动" if kind == "auto" else "手动"), "kind": kind, **pending}
+        atomic_write(self.root / "checkpoints" / (entry["id"] + ".json"), encode(entry).encode())
+        self.data.setdefault("checkpoints", []).append(
+            {key: entry[key] for key in ("id", "time", "label", "kind", "messages_len", "changes_len")})
+        self._prune_checkpoints()
+        self.save()
+        return entry["id"]
+
+    def make_checkpoint(self, label=""):
+        """手动检查点：以当前状态为快照。"""
+        self.begin_checkpoint()
+        return self.commit_checkpoint(label=label, kind="manual")
+
+    def _prune_checkpoints(self):
+        index = self.data.setdefault("checkpoints", [])
+        if len(index) <= CHECKPOINT_KEEP:
+            return
+        # 先丢最旧的自动检查点，手动检查点保留。
+        drop = [e["id"] for e in index if e["kind"] == "auto"][:len(index) - CHECKPOINT_KEEP]
+        if not drop:
+            return
+        self.data["checkpoints"] = [e for e in index if e["id"] not in drop]
+        for checkpoint_id in drop:
+            (self.root / "checkpoints" / (checkpoint_id + ".json")).unlink(missing_ok=True)
+
+    def checkpoint(self, checkpoint_id):
+        for entry in self.data.get("checkpoints", []):
+            if entry["id"] == checkpoint_id:
+                path = self.root / "checkpoints" / (checkpoint_id + ".json")
+                return json.loads(path.read_text(encoding="utf-8"))
+        raise ValueError("未知检查点：" + checkpoint_id)
+
+    def latest_checkpoint(self):
+        index = self.data.get("checkpoints", [])
+        return index[-1]["id"] if index else None
 
     def repair_pending(self):
         messages = self.data["messages"]

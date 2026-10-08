@@ -21,7 +21,22 @@
   （托管 Python 本体没装 anthropic/openai，mock 路径够用；真模型需装 `.[anthropic]`）。
 - 测试：`cd edacode && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests -v`
 - 冒烟：`python run.py --provider mock --workspace . --json -p "列出当前文件"`
-- 项目内**没有 `.env`**（含密钥的那份在历史迁移中丢失），跑真模型需主人自己放回。
+- 主人已把 `.env` 放回项目根（`ANTHROPIC_BASE_URL=https://4sapi.org` / `ANTHROPIC_API_KEY` /
+  `MODEL_ID=claude-opus-4-6`），且已被 `.gitignore` 忽略（安全）。**不要在回复里回显 key**。
+- 主机的 uv 在 `C:\Users\edac\.local\bin\uv.exe`；该目录是主人的用户级 CLI 目录（`claude.exe`、
+  `uv`、`jadx-mcp-server` 都在这），且**已在持久 PATH 上**。
+
+## 全局命令安装（2026-10-08 完成）
+- `edacode` 已用 **`uv tool install --editable D:\project_all\jason\edacode`** 装成全局命令，
+  shim 在 `C:\Users\edac\.local\bin\edacode.exe`，工具环境在 `%APPDATA%\uv\tools\edacode`。
+  → 改源码即时生效（editable）；重装用 `uv tool install --editable --force`，
+  卸载用 `uv tool uninstall edacode`。
+- **配置查找顺序**：`<当前目录>/.env` → `~/.edacode/.env`（用户级兜底，已写入真实 key）。
+  实现见 `config.py:load_config`（先工作区后 home，`load_dotenv(override=False)` 让工作区优先）。
+- `--workspace` 默认 `.`，所以**在哪个目录敲 `edacode`，那个目录就是工作区**。
+- 注意：WorkBuddy 沙箱里的 PowerShell 工具**捕获不到原生命令 stdout**（`python --version` 也是空的），
+  验证 CLI 请用 Bash 工具；沙箱 PATH 首位的 `safe-bin` 垫片会让裸命令名解析异常，属沙箱现象。
+
 
 ## 约定
 - 交付要说清：改了哪些文件 / 接口或命令怎么用 / 怎么验证的。

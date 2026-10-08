@@ -184,6 +184,28 @@ class Engine:
         self.store.save()
         return {"status": status, "text": text, "reason": reason, "turns": self.turns, "session": self.store.id}
 
+    def restore(self, checkpoint_id=None):
+        """把文件、对话、计划、Goal 一起回滚到某个检查点。"""
+        checkpoint_id = checkpoint_id or self.store.latest_checkpoint()
+        if not checkpoint_id:
+            raise ValueError("当前会话没有检查点；先修改文件或运行 /checkpoint")
+        entry = self.store.checkpoint(checkpoint_id)
+        reverted, skipped = self.tools.restore_files(entry["changes_len"])
+        if entry["generation"] != self.store.data.get("generation", 0):
+            conversation = "对话未回滚：检查点之后发生过上下文压缩，历史已被重写（文件已回滚）"
+        elif entry["messages_len"] > len(self.messages):
+            conversation = "对话未回滚：当前历史比检查点更短"
+        else:
+            del self.messages[entry["messages_len"]:]
+            conversation = f"对话回滚到 {entry['messages_len']} 条消息"
+        self.store.data["todos"] = entry["todos"]
+        self.store.data["goal"] = entry["goal"]
+        self.store.save()
+        assert_protocol(self.messages)
+        self.store.event("checkpoint_restore", checkpoint=checkpoint_id, reverted=reverted,
+                         skipped=[path for path, _ in skipped])
+        return {"id": checkpoint_id, "reverted": reverted, "skipped": skipped, "conversation": conversation}
+
     def _finish_goal(self):
         self.goal["checks"] += 1
         try:
@@ -208,6 +230,8 @@ class Engine:
             return self._result("error", reason="输入过长，请保存为文件并提供路径")
         if not self.child:
             self.cancel.clear()
+            # 回合起点快照；只有本回合真的改了文件才会落盘成检查点。
+            self.store.begin_checkpoint()
         self.latest_request = user_text
         self.messages.append({"role": "user", "content": user_text})
         self.store.data["title"] = self.store.data.get("title") or user_text[:80]

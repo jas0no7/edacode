@@ -2,10 +2,11 @@
 import argparse
 from datetime import datetime
 import json
+import random
 import re
 import sys
 
-from . import __version__
+from . import __version__, ui
 from .commands import discover as discover_commands, expand, inject_references
 from .config import load_config
 from .engine import Engine
@@ -23,6 +24,8 @@ HELP = """/help                         帮助
 /cancel <job_id>              停止当前会话的后台作业
 /diff                         查看专用工具的文件变更（不包含 shell 写入）
 /undo                         撤销最近一次文件变更，遇到外部修改会拒绝
+/checkpoint [说明]            手动记录检查点（文件 + 对话 + 计划 + Goal）
+/restore [ID|latest]          列出或回滚到检查点；外部改过的文件会跳过
 /compact                      归档旧上下文并保留事实摘要
 /clear                        归档后清空对话和计划、清除 Goal
 /tools                        可用工具
@@ -42,25 +45,29 @@ def safe_terminal(text):
 
 
 class Terminal:
-    def __init__(self, quiet=False, interactive=True):
+    def __init__(self, quiet=False, interactive=True, palette=None):
         self.quiet, self.interactive, self.streaming = quiet, interactive, False
+        self.palette = palette or ui.PLAIN
 
     def display(self, kind, text):
         if self.quiet:
             return
         text = safe_terminal(text)
+        p = self.palette
         if kind == "stream":
             if not self.streaming:
-                print("\n助手：", end="", flush=True)
+                print("\n" + p.accent + "助手" + p.reset + " ", end="", flush=True)
                 self.streaming = True
             print(text, end="", flush=True)
         elif kind == "stream_end":
             self.streaming = False
             print(flush=True)
         elif kind == "assistant":
-            print("\n助手：" + text, flush=True)
+            print("\n" + p.accent + "助手" + p.reset + " " + text, flush=True)
+        elif kind == "error":
+            print(f"\n{p.red}[error]{p.reset} {text}", file=sys.stderr, flush=True)
         else:
-            print(f"\n[{kind}] {text}", file=sys.stderr, flush=True)
+            print(f"\n{p.muted}[{kind}]{p.reset} {text}", file=sys.stderr, flush=True)
 
     def confirm(self, name, detail):
         if not self.interactive or not sys.stdin.isatty():
@@ -87,6 +94,7 @@ def parser():
     p.add_argument("--resume", nargs="?", const="latest", help="恢复指定 ID 或最近主会话")
     p.add_argument("--max-turns", type=int)
     p.add_argument("--no-stream", action="store_true")
+    p.add_argument("--no-banner", action="store_true", help="不显示欢迎屏，只打印一行启动信息")
     p.add_argument("--version", action="version", version=__version__)
     return p
 
@@ -100,6 +108,7 @@ def command(text, config, store, engine):
         return json.dumps({"session": store.id, "workspace": str(config.workspace), "mode": engine.policy.mode,
                            "provider": config.provider, "model": config.model, "messages": len(engine.messages),
                            "usage": store.data["usage"], "goal": engine.goal, "todos": store.data["todos"],
+                           "checkpoints": len(store.data.get("checkpoints", [])),
                            "changes": len(store.data["changes"])}, ensure_ascii=False, indent=2)
     if name == "/mode":
         if rest not in {"plan", "ask", "edit", "auto"}:
@@ -145,6 +154,21 @@ def command(text, config, store, engine):
     if name == "/diff":
         return "\n\n".join(f"[{x['status']}{'/已撤销' if x['undone'] else ''}] {x['path']}\n{x['diff']}"
                             for x in store.data["changes"][-10:]) or "无专用工具文件变更"
+    if name == "/checkpoint":
+        return "已创建检查点：" + engine.store.make_checkpoint(rest)
+    if name == "/restore":
+        index = store.data.get("checkpoints", [])
+        if not rest:
+            return "\n".join(
+                f"{x['id']}  [{x['kind']}] {datetime.fromtimestamp(x['time']).isoformat(timespec='seconds')}"
+                f"  {safe_terminal(x['label'])}  (消息 {x['messages_len']} / 变更 {x['changes_len']})"
+                for x in reversed(index)) or "当前会话没有检查点"
+        result = engine.restore(index[-1]["id"] if rest == "latest" else rest)
+        lines = [f"已回滚检查点 {result['id']}", result["conversation"],
+                 "文件已回滚：" + (", ".join(result["reverted"]) or "无")]
+        if result["skipped"]:
+            lines.append("跳过：" + "; ".join(f"{path}（{why}）" for path, why in result["skipped"]))
+        return "\n".join(lines)
     if name == "/compact":
         return "上下文已压缩" if engine._context(force=True) else "无须压缩"
     if name == "/tools":
@@ -170,6 +194,8 @@ def command(text, config, store, engine):
         archive = store.artifact(json.dumps(engine.messages, ensure_ascii=False), "history")
         engine.messages.clear()
         store.data["todos"] = []
+        # 历史被清空，旧检查点无法再按 messages_len 回滚对话，一并清除。
+        store.data["checkpoints"] = []
         engine.clear_goal()
         store.save()
         return "对话已清空，旧消息归档：" + archive
@@ -194,34 +220,40 @@ def main(argv=None):
     if args.prompt is not None and args.query:
         p.error("位置任务与 -p 不能同时使用")
     args.no_stream = args.no_stream or args.json
-    ui = Terminal(quiet=args.json, interactive=args.prompt is None)
+    ui.enable_windows_ansi()
+    palette = ui.Palette(ui.supports_color(sys.stdout))
+    console = Terminal(quiet=args.json, interactive=args.prompt is None, palette=palette)
     store = engine = None
     try:
         config = load_config(args)
         store = Store(config, args.resume)
-        engine = Engine(config, store, display=ui.display, confirm=ui.confirm)
+        engine = Engine(config, store, display=console.display, confirm=console.confirm)
         def submit(text):
             try:
                 if text.startswith("/"):
                     result = command(text, config, store, engine)
                 else:
-                    result = engine.run(inject_references(text, engine.tools, ui.display))
+                    result = engine.run(inject_references(text, engine.tools, console.display))
                 if isinstance(result, str):
-                    ui.display("info", result)
+                    console.display("info", result)
                     result = {"status": "completed", "text": result, "session": store.id}
                 elif result.get("reason"):
-                    ui.display(result["status"], result["reason"])
+                    console.display(result["status"], result["reason"])
                 return result
             except Exception as exc:
                 result = {"status": "error", "text": "", "reason": engine.error_text(exc), "session": store.id}
-                ui.display("error", result["reason"])
+                console.display("error", result["reason"])
                 return result
         if args.prompt is not None:
             result = submit(args.prompt)
             if args.json:
                 print(json.dumps({**result, "usage": store.data["usage"]}, ensure_ascii=False))
             return 0 if result["status"] == "completed" else 130 if result["status"] == "cancelled" else 1
-        print(f"EdaCode {__version__} | {config.provider}/{config.model or 'mock'} | {config.mode}\n工作区：{config.workspace}\n会话：{store.id}\n/help 查看命令；/quit 退出。", flush=True)
+        if args.no_banner:
+            print(f"EdaCode {__version__} | {config.provider}/{config.model or 'mock'} | {config.mode}"
+                  f"\n工作区：{config.workspace}\n会话：{store.id}\n/help 查看命令；/quit 退出。", flush=True)
+        else:
+            print(ui.welcome(config, engine.tools, palette, tip=random.choice(ui.TIPS)), flush=True)
         try:
             import readline  # macOS/Linux 自带行编辑和内存输入历史。
         except ImportError:
@@ -229,10 +261,10 @@ def main(argv=None):
         pending = " ".join(args.query).strip()
         while True:
             try:
-                text = pending or input("\n你：").strip()
+                text = pending or input(ui.prompt_text(palette, config.mode)).strip()
                 pending = ""
                 while text.endswith("\\"):
-                    text = text[:-1] + "\n" + input("… ")
+                    text = text[:-1] + "\n" + input(f"{palette.faint}… {palette.reset}").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\n会话已保存。")
                 break

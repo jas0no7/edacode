@@ -71,7 +71,7 @@ EdaCode 采纳：`commands.py` 用 Markdown（免 TOML 依赖，且与项目已�
 - `/restore` 同时回滚文件与对话，并重新提出原来的 tool call。
 - 需要显式开启（`settings.json`），且依赖 Git。
 
-EdaCode 现状：已有文件级 `/undo`（SHA-256 校验 + base64 before 镜像）和会话级 `--resume`，但**没有"文件 + 对话"一起回滚的 checkpoint**。依赖影子 Git 的实现方式与"不自动操作 Git"的边界冲突，因此标记为待设计，未在本轮实现。
+EdaCode 现状：**已实现回合级 checkpoint / restore**。做法与 Gemini CLI 不同——不建影子 Git 仓库，而是复用文件编辑时已经记录的改动前镜像（`changes[].before`）和会话里的 `messages_len` / `generation` / `todos` / `goal` 锚点，回滚时不复制整份消息体。`/restore` 同时回滚文件、对话、计划与 Goal；被外部改过的文件跳过不覆盖；发生过上下文压缩（`generation` 变化）时拒绝回滚对话，只回滚文件。这样既拿到了"文件 + 对话一起回滚"的能力，又守住了"不自动操作 Git"的边界。
 
 ### Codex / Gemini：权限与沙箱模型
 
@@ -92,4 +92,4 @@ EdaCode 最初按 macOS/Linux 编写，直接使用 `fcntl.flock`、`os.killpg`�
 
 ## 取舍
 
-这些项目的语言、模型 API、sandbox、授权体系不同；直接复制某个实现会把其运行时假设带进当前 Python 项目。EdaCode 先实现可验证的公共内核：结构化消息、单一工具边界、会话锁、文件冲突保护、进程组清理和可解释权限模式；已接入的部分是自定义命令、`@` 注入和 stdio MCP。仍未实现的是 checkpoint/restore、worktree/团队、Cron、统一 harness、MCP 的 HTTP/SSE transport，以及真正的 OS 级沙箱。
+这些项目的语言、模型 API、sandbox、授权体系不同；直接复制某个实现会把其运行时假设带进当前 Python 项目。EdaCode 先实现可验证的公共内核：结构化消息、单一工具边界、会话锁、文件冲突保护、进程组清理和可解释权限模式；已接入的部分是自定义命令、`@` 注入、stdio MCP 和回合级 checkpoint/restore。仍未实现的是 worktree/团队、Cron、统一 harness、MCP 的 HTTP/SSE transport，以及真正的 OS 级沙箱。

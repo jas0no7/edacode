@@ -35,22 +35,33 @@ class Config:
         if self.context_chars < 8000:
             raise ValueError("context_chars 不能小于 8000")
         if self.provider != "mock" and (not self.model or not self.api_key):
-            raise ValueError("缺少模型或 API key；请配置 .env，或使用 --provider mock 离线体验")
+            raise ValueError(
+                f"缺少模型或 API key；请在 {self.workspace}/.env 或 {self.home}/.env 配置，"
+                "或使用 --provider mock 离线体验"
+            )
         return self
 
 
 def load_config(args) -> Config:
     workspace = Path(args.workspace).expanduser().resolve()
+    home = Path(args.home or os.getenv("EDACODE_HOME", "~/.edacode")).expanduser()
     from dotenv import load_dotenv
-    env_file = Path(args.env_file).expanduser() if args.env_file else workspace / ".env"
-    if args.env_file and not env_file.is_file():
-        raise ValueError(f"env 文件不存在：{env_file}")
-    load_dotenv(env_file, override=False)
+    if args.env_file:
+        env_file = Path(args.env_file).expanduser()
+        if not env_file.is_file():
+            raise ValueError(f"env 文件不存在：{env_file}")
+        load_dotenv(env_file, override=False)
+    else:
+        # 先工作区、后用户级。override=False 让先加载的工作区配置优先，用户级配置只补空缺。
+        # 这样在任意目录下都能靠 ~/.edacode/.env 里的 key 唤醒，而项目内的 .env 仍可覆盖它。
+        for candidate in (workspace / ".env", home / ".env"):
+            if candidate.is_file():
+                load_dotenv(candidate, override=False)
     provider = args.provider or os.getenv("EDACODE_PROVIDER", "anthropic")
     prefix = "OPENAI" if provider == "openai" else "ANTHROPIC"
     return Config(
         workspace=workspace,
-        home=Path(args.home or os.getenv("EDACODE_HOME", "~/.edacode")),
+        home=home,
         provider=provider,
         model=args.model or os.getenv("EDACODE_MODEL") or os.getenv("MODEL_ID", ""),
         api_key=os.getenv(f"{prefix}_API_KEY", ""),

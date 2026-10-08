@@ -67,7 +67,10 @@ class Provider:
         if config.base_url:
             kwargs["base_url"] = config.base_url
         if config.provider == "anthropic":
-            from anthropic import Anthropic
+            try:
+                from anthropic import Anthropic
+            except ImportError as exc:
+                raise ValueError("Anthropic provider 需要安装 SDK：pip install anthropic（或 pip install -e .）") from exc
             self.client = Anthropic(**kwargs)
         else:
             try:

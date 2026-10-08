@@ -6,8 +6,14 @@ build-backend = "setuptools.build_meta"
 name = "edacode"
 version = "0.1.0"
 description = "A small, inspectable interactive coding agent"
+readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = ["anthropic>=0.40", "python-dotenv>=1.0"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
 
 [project.optional-dependencies]
 openai = ["openai>=1.50"]
