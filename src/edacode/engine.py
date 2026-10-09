@@ -9,7 +9,7 @@ import time
 from .context import assert_protocol, compact, excerpt, serialized
 from .permissions import Policy
 from .providers import make_provider
-from .storage import Store, atomic_write, encode, project_root
+from .storage import Store, atomic_write, digest, encode, project_root
 from .tools import Tools
 
 
@@ -190,6 +190,10 @@ class Engine:
         if not checkpoint_id:
             raise ValueError("当前会话没有检查点；先修改文件或运行 /checkpoint")
         entry = self.store.checkpoint(checkpoint_id)
+        if (entry["generation"] == self.store.data.get("generation", 0)
+                and entry.get("messages_digest")
+                and digest(encode(self.messages[:entry["messages_len"]]).encode()) != entry["messages_digest"]):
+            raise ValueError("检查点所属对话分支已变化，未回滚文件或对话；请选择当前分支的检查点")
         reverted, skipped = self.tools.restore_files(entry["changes_len"])
         if entry["generation"] != self.store.data.get("generation", 0):
             conversation = "对话未回滚：检查点之后发生过上下文压缩，历史已被重写（文件已回滚）"

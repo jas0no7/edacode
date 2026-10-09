@@ -63,7 +63,7 @@ def compact(engine, force=False, budget=None):
         split = max(1, len(groups) // 2)
         omitted, tail = groups[:split], groups[split:]
     old = [message for group in omitted for message in group]
-    latest_request = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+    latest_request = engine.latest_request or next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
     summary = "未生成模型摘要，请按需恢复原始记录。"
     try:
         response = engine.provider.complete(

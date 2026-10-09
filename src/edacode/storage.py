@@ -123,6 +123,7 @@ class Store:
             "time": time.time(),
             "generation": self.data.get("generation", 0),
             "messages_len": len(self.data["messages"]),
+            "messages_digest": digest(encode(self.data["messages"]).encode()),
             "todos": copy.deepcopy(self.data["todos"]),
             "goal": copy.deepcopy(self.data["goal"]),
             "changes_len": len(self.data["changes"]),

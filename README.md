@@ -1,12 +1,15 @@
 # EdaCode
 
-EdaCode 是一个独立、可检查的交互式 coding agent。它的设计来源有两处：一是作者学习 agent 时写的 `01.py`–`17.py` 系列脚本（这些脚本已不在本仓库中，只保留了下面的经验映射表），二是对 Codex、OpenCode、Gemini CLI、Qwen Code、ZCode 等开源 agent 的架构调研。EdaCode 不导入任何课程脚本，可以独立升级。
+EdaCode 是一个独立、可检查的交互式 coding agent。它的设计来源有两处：一是上级目录中的 `01.py`–`17.py` 学习脚本，二是对 Codex、OpenCode、Gemini CLI、Qwen Code、ZCode 等开源 agent 的架构调研。EdaCode 不导入任何课程脚本，可以独立安装和升级。
 
 ## 运行
 
 在项目目录（`edacode/`）下执行：
 
 ```bash
+# 首次使用：Python 3.10+，建议在虚拟环境中安装
+python -m pip install -e '.[openai]'
+
 # 不需要 API key，先用确定性的离线工具调用检查安装
 python run.py --provider mock --workspace .
 
@@ -29,7 +32,7 @@ pipx install --editable /path/to/edacode
 python -m pip install -e /path/to/edacode
 ```
 
-装好后 `edacode` 落在 `~/.local/bin`（Windows）或同名用户 bin 目录，**当前目录就是工作区**：
+安装工具会提示命令入口所在目录；确保该目录在 PATH 中。使用虚拟环境安装时，需要先激活环境。**当前目录就是工作区**：
 
 ```bash
 cd ~/any/other/project
@@ -40,7 +43,8 @@ edacode -p "跑一下测试"   # 单次执行
 配置查找顺序（`--env-file` 显式指定时只用那一份）：
 
 ```text
-<当前目录>/.env      项目级，优先级最高
+已导出的环境变量    优先级最高
+<当前目录>/.env      项目级
 ~/.edacode/.env      用户级，全局兜底；任意目录下都能靠它拿到 key
 ```
 
@@ -48,11 +52,11 @@ edacode -p "跑一下测试"   # 单次执行
 
 卸载：`uv tool uninstall edacode`（或 `pipx uninstall edacode`）。
 
-Windows 与 macOS/Linux 都支持：文件锁在 Windows 用 `msvcrt.locking`、在 POSIX 用 `fcntl.flock`；shell 工具优先探测 `bash`（Git for Windows / MSYS2），找不到才回退系统 shell；进程终止在 Windows 用 `taskkill /T`、在 POSIX 用 `killpg`。这些平台分支集中在 `src/edacode/compat.py`，可用 `EDACODE_SHELL` 指定 bash 路径。
+已实现 Windows/POSIX 平台分支：文件锁使用 `msvcrt.locking` 或 `fcntl.flock`，进程清理使用 `taskkill /T` 或 `killpg`。Windows 优先探测 bash（可用 `EDACODE_SHELL` 指定），找不到时回退系统 shell；POSIX 使用 `/bin/bash`。本轮运行验证在 macOS 完成，Windows/Linux 尚未实机验证。
 
 `edacode/.env.example` 是配置模板。也支持 OpenAI Chat Completions 兼容接口：安装 `pip install -e '.[openai]'`，设置 `EDACODE_PROVIDER=openai`、`OPENAI_API_KEY` 和 `EDACODE_MODEL`。
 
-会话状态默认保存在 `~/.edacode/projects/<workspace-hash>/sessions/`，可以用 `--resume` 或 `--resume latest` 继续。状态目录不写进项目，避免把密钥、对话和运行日志误提交。
+会话状态默认保存在 `~/.edacode/projects/<workspace-hash>/sessions/`，可以用 `--resume` 或 `--resume latest` 继续。状态包含对话、工具输出和文件前镜像；分享日志前应检查其中的敏感内容。
 
 ## 界面
 
@@ -75,7 +79,7 @@ Windows 与 macOS/Linux 都支持：文件锁在 Windows 用 `msvcrt.locking`、
  ~/proj  ● 2 MCP  /status                                              0.1.0
 ```
 
-- 只用标准库 + ANSI 转义序列，**不引入 TUI 框架**：在 cmd / PowerShell / Windows Terminal / Git Bash(mintty) / macOS / Linux 上都稳定，不需要 winpty。
+- 界面使用标准库和 ANSI 转义序列，不依赖 TUI 框架；这是逐行交互的 REPL。
 - 模式用颜色区分（Plan 青 / Ask 黄 / Edit 蓝 / Auto 绿）；正文用 16 色 ANSI，跟随终端主题；只有 logo 的竖向渐变是 256 色灰度，针对深色终端调优。
 - 非 tty（管道、重定向）或设置了 `NO_COLOR` 时**自动降级为纯文本**，`python run.py ... > out.txt` 不会混入转义码。
 - `--no-banner` 跳过欢迎屏，只打印一行启动信息，脚本里更清爽。
@@ -130,11 +134,11 @@ argument-hint: <path>
 @{docs/best-practices.md}
 ```
 
-展开顺序是 参数替换 → 文件注入 → shell 注入：参数因此可以用在 `!{...}` 里，而被注入的文件正文不会被二次替换。
+只解析原始模板中的注入块，按出现顺序展开一次。文件内容、命令输出和传入参数都不会被再次解释为注入语法。shell 块内的参数会按单个字面量自动转义，例如 `!{git diff -- $1}`；占位符应放在引号外，不支持在 heredoc 中使用。带参数的 shell 模板要求 bash。
 
 ## 外部 MCP 工具
 
-在项目根目录或 `.edacode/mcp.json` 放一份配置，EdaCode 会在启动时用 stdio 启动这些 server 并合并其工具：
+在项目根目录或 `.edacode/mcp.json` 放一份配置，EdaCode 启动时会检查权限，再通过 stdio 启动 server 并合并其工具：
 
 ```json
 {"mcpServers": {"filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]}}}
@@ -142,30 +146,30 @@ argument-hint: <path>
 
 - 工具名统一为 `mcp__<server>__<tool>`，出现在 `/tools` 里，`/mcp` 查看 server 状态。
 - 握手使用 JSON-RPC over stdio（`initialize` → `notifications/initialized` → `tools/list` → `tools/call`），协议版本 `2024-11-05`。
-- 外部工具定义**不等于**授权：`plan` 模式拒绝，`ask`/`edit` 模式逐次审批，`auto` 才自动执行。
+- server 进程启动和外部工具调用分别经过权限检查：`plan` 拒绝，`ask`/`edit` 询问，`auto` 自动执行。无交互输入时，需要审批的操作会拒绝。
 - 单个 server 启动失败只记录到 `/mcp`，不影响内置工具和其他 server。
 
 ## 检查点与回滚
 
-EdaCode 在每个用户回合开始时自动打一个检查点，把"文件 + 对话 + 计划 + Goal"绑在同一个时间点上。和 Gemini CLI 不同，它**不依赖影子 Git 仓库**，而是复用文件编辑时已经记录的改动前镜像（`changes[].before`）：
+EdaCode 在每个用户回合开始时记录起点，第一次通过文件工具写入时才保存自动检查点。它将文件、对话、计划、Goal 关联到同一时间点，通过文件前镜像（`changes[].before`）恢复，无需影子 Git 仓库：
 
 ```text
 /checkpoint 重构前      手动打一个带标签的检查点
 /restore latest         回滚到最近一次检查点
-/restore <ID>           回滚到指定检查点（ID 见 /status）
+/restore <ID>           回滚到指定检查点（用 /restore 列出 ID）
 ```
 
-- 一个检查点记录四样东西：对话长度 `messages_len`、压缩代数 `generation`、`todos`、`goal`，以及改动条数 `changes_len`。回滚时按这些锚点恢复，而不是复制整份消息体。
+- 检查点记录对话长度及摘要哈希、压缩代数、计划、Goal 和改动条数。回滚后另起分支时，已丢弃分支的检查点会拒绝恢复，避免按相同消息长度截断新工作。
 - **文件回滚**：把检查点之后被改动或新建的文件还原/删除。若某文件在检查点之后被**外部**改过（当前内容与 EdaCode 记录的 after 哈希不一致），则跳过并在结果里列出，不覆盖主人的手改。
 - **对话回滚**：截断到 `messages_len`。如果期间发生过上下文压缩（`generation` 变了），或当前历史比检查点还短，就**拒绝回滚对话**，只回滚文件，避免把压缩后的历史截错。
-- 检查点按时间保留最近 `CHECKPOINT_KEEP`（30）个，自动淘汰更旧的。
+- 超过 `CHECKPOINT_KEEP`（30）时优先淘汰旧自动检查点，手动检查点保留，因此总数可能超过 30。
 - `/clear` 会一并清空检查点。
 
 ## 已实现的核心
 
 - Anthropic Messages API 和 OpenAI 兼容接口的 provider 适配；网络/限流错误只在没有输出或工具执行前重试。
 - 结构化工具循环：每个 `tool_use` 都对应一个 `tool_result`，工具异常会回传给模型，不会让整个会话崩溃。
-- 工作区边界：文件工具解析真实路径、拒绝软链接越界和 `.git`，跳过 `.env`、构建目录和 `.edacode`。
+- 工作区边界：文件工具解析真实路径、拒绝软链接越界和 `.git`；文件发现跳过 `.env`、构建目录和 `.edacode`。显式读取路径不使用发现规则，不能把它当作密钥访问隔离。
 - 文件编辑的读取前置、SHA-256 变更检测、唯一匹配、统一 diff、审批后再次冲突检查、原子写入和 `/undo`。
 - 前后台 shell 进程组、超时、2 MB 输出限额、最多四个并发作业、Ctrl-C 清理；重启不会假装恢复后台进程。
 - 项目级 `AGENTS.md`、`GEMINI.md`、`EDACODE.md` 指令和 `skills/*/SKILL.md` 按需加载。
@@ -184,7 +188,7 @@ EdaCode 在每个用户回合开始时自动打一个检查点，把"文件 + �
 
 ## 从 01.py–17.py 提炼的结构
 
-这些课程脚本已不在仓库中；下表保留它们与 EdaCode 模块的对应关系，方便回溯设计来源。
+原脚本保留在上级目录；下表与 [逐脚本记录](docs/lessons.md) 说明它们和 EdaCode 模块的对应关系。
 
 | 学习脚本 | 主要经验 | EdaCode 的落点 |
 | --- | --- | --- |
@@ -200,11 +204,12 @@ EdaCode 在每个用户回合开始时自动打一个检查点，把"文件 + �
 
 ## 参考的开源 agent 设计
 
-- [OpenAI Codex CLI](https://github.com/openai/codex)：本地终端 agent、`AGENTS.md` 项目指令和 suggest/auto-edit/full-auto 这种权限分层启发了 EdaCode 的模式设计。
+- [OpenAI Codex CLI](https://github.com/openai/codex)：本地终端 agent、`AGENTS.md` 项目指令、审批与执行隔离的区分。
 - [OpenCode](https://github.com/anomalyco/opencode)：内置 build/plan 主 agent 与 general 子 agent 的职责分离启发了只读 `plan` 和 `delegate`。
-- [Gemini CLI](https://github.com/google-gemini/gemini-cli)：**custom commands（TOML/Markdown + `{{args}}` / `!{shell}` / `@{file}` / `:` 命名空间）**、`@` 文件引用、checkpoint/restore、context 文件、MCP 和 headless JSON 入口。
+- [Gemini CLI](https://github.com/google-gemini/gemini-cli)：TOML custom commands、参数和上下文注入、checkpoint/restore、项目指令、MCP 和 headless 入口；EdaCode 的命令文件选择 Markdown。
 - [Qwen Code](https://github.com/QwenLM/qwen-code)：独立上下文 subagent、项目级 Markdown 命令与 skill、多协议 provider 分层、headless 与 session 管理。
-- [ZCode](https://github.com/zai-org/ZCode) 与 [Softorize/zcode](https://github.com/Softorize/zcode)：结构化 `assistant + tool_calls + control`、policy/audit、mock provider、验证后再结束和 CI/headless 入口。
+- [Z.ai ZCode CLI](https://github.com/zai-org/ZCode/blob/main/apps/zcode-cli/README.md)：CLI/core/UI 分层，插件可提供 skills、commands 和 MCP server。
+- [Softorize/zcode](https://github.com/Softorize/zcode)：另一个同名 Zig 项目，其 README 描述了结构化输出、mock provider、验证后结束与 headless 入口。这里仅参考这些机制，不将其能力归给 Z.ai 项目。
 
 EdaCode 采纳的是可解释的机制，而不是照搬实现：
 
@@ -217,8 +222,8 @@ EdaCode 采纳的是可解释的机制，而不是照搬实现：
 | `@` 文件引用 | Gemini CLI | `commands.inject_references` |
 | 回合级 checkpoint / restore | Gemini CLI | `storage.py`（复用 `changes[].before`，不依赖 Git） |
 | MCP 外部工具 | Gemini / Qwen / Codex | `mcp.py`（stdio，命名空间 + 审批） |
-| 独立 Goal 判断器 | 课程 17.py / ZCode「验证后再结束」 | `GoalEvaluator` |
-| mock provider + headless JSON | ZCode | `--provider mock`、`--json -p` |
+| 独立 Goal 判断器 | 课程 17.py | `GoalEvaluator` |
+| mock provider + headless JSON | Softorize/zcode | `--provider mock`、`--json -p` |
 
 这些项目的许可证、模型能力和沙箱实现各不相同；EdaCode 只采用公开文档中可解释的架构方法，没有复制其源码或品牌。
 
@@ -240,7 +245,7 @@ python run.py --provider mock --workspace . --json -p "列出当前文件"
 printf '/status\n/mcp\n/commands list\n/tools\n/quit\n' | python run.py --provider mock --workspace . --no-stream
 
 # 全局命令验证：换到无关目录仍能启动（先装好 uv tool install --editable）
-cd /tmp && edacode --version && edacode -p "只回答一个数字：6 乘以 7 等于多少"
+cd /tmp && edacode --version && edacode --provider mock --json -p "列出当前文件"
 ```
 
 ## 目录
@@ -267,6 +272,8 @@ edacode/
     storage.py            # snapshot、checkpoint、events、artifact、锁
   tests/
     test_edacode.py       # 单元与端到端测试
+    test_runtime_regressions.py # 中断、Goal、上下文、进程及命令回归
+    test_provider_http.py # 真实 SDK + 本地 HTTP/SSE 模拟服务
     mcp_echo_server.py    # 测试用的最小 MCP server
   docs/
     lessons.md            # 01.py–17.py 逐脚本经验映射
@@ -275,7 +282,7 @@ edacode/
 
 ## 当前边界
 
-已实现：stdio MCP、自定义命令与 `@` / `!{}` 注入、回合级 checkpoint/restore、Windows/POSIX 跨平台。
+已实现：stdio MCP、自定义命令与 `@` / `!{}` 注入、回合级 checkpoint/restore、Windows/POSIX 平台分支。验证范围与命令见 [验收记录](docs/validation.md)。
 
 未实现（保留边界，避免把"有一个同名工具"误报成完整功能）：
 

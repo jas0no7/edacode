@@ -70,7 +70,8 @@ def shell_argv(command):
 
 def kill_tree(process):
     """终止进程及其全部子进程；尽力而为，进程已退出或权限不足都不抛异常。"""
-    if process.poll() is not None:
+    # POSIX 组长退出不意味着子进程已经退出；仍要回收同组后代。
+    if IS_WINDOWS and process.poll() is not None:
         return
     try:
         if IS_WINDOWS:

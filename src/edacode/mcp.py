@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 import threading
-import time
+from .compat import IS_WINDOWS, kill_tree
 
 PROTOCOL_VERSION = "2024-11-05"
 
@@ -28,6 +28,8 @@ class MCPServer:
         self.next_id = 0
         self.tools = []
         self.stderr = bytearray()
+        self.readers = []
+        self.closed = False
 
     def start(self):
         command = self.spec.get("command")
@@ -42,11 +44,14 @@ class MCPServer:
             self.process = subprocess.Popen(
                 [command, *[str(a) for a in args]], cwd=self.cwd, env=env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace", bufsize=1)
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+                start_new_session=not IS_WINDOWS)
         except OSError as exc:
             raise MCPError(f"无法启动 {self.name}：{exc}") from exc
-        threading.Thread(target=self._read_stdout, daemon=True).start()
-        threading.Thread(target=self._read_stderr, daemon=True).start()
+        self.readers = [threading.Thread(target=target, daemon=True)
+                        for target in (self._read_stdout, self._read_stderr)]
+        for reader in self.readers:
+            reader.start()
         self.request("initialize", {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},
                                     "clientInfo": {"name": "edacode", "version": "0.1.0"}})
         self.notify("notifications/initialized", {})
@@ -63,20 +68,24 @@ class MCPServer:
             rid = self.next_id
             entry = {"event": threading.Event(), "result": None, "error": None}
             self.pending[rid] = entry
-        self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
-        if not entry["event"].wait(self.timeout):
-            self.pending.pop(rid, None)
-            raise MCPError(f"mcp server {self.name} 响应超时：{method}")
-        self.pending.pop(rid, None)
-        if entry["error"] is not None:
-            raise MCPError(f"mcp server {self.name} 的 {method} 失败：{entry['error']}")
-        return entry["result"]
+        try:
+            self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
+            if not entry["event"].wait(self.timeout):
+                raise MCPError(f"mcp server {self.name} 响应超时：{method}")
+            if entry["error"] is not None:
+                raise MCPError(f"mcp server {self.name} 的 {method} 失败：{entry['error']}")
+            return entry["result"]
+        finally:
+            with self.lock:
+                self.pending.pop(rid, None)
 
     def notify(self, method, params):
         self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
     def call(self, tool, arguments):
         result = self.request("tools/call", {"name": tool, "arguments": arguments})
+        if isinstance(result, dict) and result.get("isError") is True:
+            raise MCPError(format_result(result))
         return format_result(result)
 
     def _send(self, message):
@@ -101,10 +110,13 @@ class MCPServer:
                     message = json.loads(line)
                 except ValueError:
                     continue
-                rid = message.get("id")
-                if rid is None:
+                if not isinstance(message, dict):
                     continue
-                entry = self.pending.get(rid)
+                rid = message.get("id")
+                if type(rid) not in (int, str):
+                    continue
+                with self.lock:
+                    entry = self.pending.get(rid)
                 if entry is None:
                     continue
                 if "error" in message:
@@ -112,12 +124,16 @@ class MCPServer:
                 else:
                     entry["result"] = message.get("result")
                 entry["event"].set()
+        except (OSError, ValueError):
+            pass
         finally:
+            self.process.stdout.close()
             # 进程结束时唤醒所有等待者，避免调用方永久阻塞。
-            for entry in list(self.pending.values()):
-                if entry["error"] is None:
-                    entry["error"] = "server 已退出"
-                entry["event"].set()
+            with self.lock:
+                for entry in self.pending.values():
+                    if not entry["event"].is_set():
+                        entry["error"] = "server 已退出"
+                        entry["event"].set()
 
     def _read_stderr(self):
         try:
@@ -126,25 +142,25 @@ class MCPServer:
                     self.stderr.extend(chunk.encode("utf-8", "replace"))
         except (OSError, ValueError):
             pass
+        finally:
+            self.process.stderr.close()
 
     def stderr_tail(self):
         return self.stderr.decode("utf-8", "replace")[-500:].strip() or "无输出"
 
     def close(self):
-        if not self.process:
+        if not self.process or self.closed:
             return
+        self.closed = True
+        kill_tree(self.process)
+        self.process.wait(timeout=5)
         try:
             if self.process.stdin:
                 self.process.stdin.close()
         except (OSError, ValueError):
             pass
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=5)
+        for reader in self.readers:
+            reader.join(timeout=1)
 
 
 def format_result(result):
@@ -177,12 +193,13 @@ def tool_spec(full_name, server, tool):
 class MCPManager:
     """读取工作区 mcp.json，聚合外部工具；单个 server 失败不影响其他 server。"""
 
-    def __init__(self, root, display=lambda *a: None, timeout=20):
+    def __init__(self, root, display=lambda *a: None, timeout=20, authorize_start=None):
         self.root, self.display, self.timeout = root, display, timeout
         self.servers = {}
         self.definitions = {}
         self.routes = {}
         self.errors = []
+        self.authorize_start = authorize_start
 
     def load(self):
         for name, spec in self._read_config().items():
@@ -191,6 +208,8 @@ class MCPManager:
                 continue
             server = MCPServer(name, spec, str(self.root), self.timeout)
             try:
+                if self.authorize_start:
+                    self.authorize_start(name, spec)
                 server.start()
             except Exception as exc:
                 server.close()

@@ -133,7 +133,8 @@ class Tools:
             self.definitions = {n: self.definitions[n] for n in ("read_file", "list_files", "search", "load_skill", "read_artifact")}
         else:
             # 外部 MCP 工具只在主 agent 生效；定义并入工具表，但调用仍需 Policy 审批。
-            self.mcp = MCPManager(self.root, display).load()
+            self.mcp = MCPManager(self.root, display, authorize_start=lambda name, spec: self.policy.authorize(
+                "mcp_start", encode({"server": name, "command": spec.get("command"), "args": spec.get("args", [])}))).load()
             for name, definition in self.mcp.definitions.items():
                 self.definitions[name] = definition
                 self.external[name] = (lambda arguments, _name=name: self.mcp.call(_name, arguments))
