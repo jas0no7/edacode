@@ -8,3 +8,7 @@ dist/
 *.pyc
 .DS_Store
 .idea/
+
+node_modules/
+*.tgz
+coverage/

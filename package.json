@@ -1,0 +1,61 @@
+{
+  "name": "edacode",
+  "version": "0.2.0",
+  "description": "An inspectable interactive coding agent for your terminal",
+  "type": "module",
+  "bin": {
+    "edacode": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "files": [
+    "dist/",
+    ".env.example",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jas0no7/edacode.git"
+  },
+  "homepage": "https://github.com/jas0no7/edacode#readme",
+  "bugs": {
+    "url": "https://github.com/jas0no7/edacode/issues"
+  },
+  "keywords": [
+    "cli",
+    "agent",
+    "coding",
+    "ai"
+  ],
+  "scripts": {
+    "build": "tsc && node scripts/check-build.mjs",
+    "start": "node dist/cli.js",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:package": "node scripts/test-package.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm test && npm run test:package"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.132.1",
+    "cross-spawn": "^7.0.6",
+    "diff": "^9.0.0",
+    "dotenv": "^18.0.6",
+    "jsonc-parser": "^3.3.1",
+    "openai": "^7.30.1",
+    "proper-lockfile": "^4.1.2",
+    "string-width": "^8.3.0"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node": "^26.6.4",
+    "@types/proper-lockfile": "^4.1.4",
+    "typescript": "^7.0.2"
+  }
+}

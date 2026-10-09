@@ -1,296 +1,223 @@
 # EdaCode
 
-EdaCode 是一个独立、可检查的交互式 coding agent。它的设计来源有两处：一是上级目录中的 `01.py`–`17.py` 学习脚本，二是对 Codex、OpenCode、Gemini CLI、Qwen Code、ZCode 等开源 agent 的架构调研。EdaCode 不导入任何课程脚本，可以独立安装和升级。
+EdaCode 是一个在终端中协助你检查、修改和验证代码的交互式 coding agent。0.2.0 起使用 TypeScript / Node.js，支持 macOS、Linux、Windows，无需 Python。
 
-## 运行
+## 安装和启动
 
-在项目目录（`edacode/`）下执行：
-
-```bash
-# 首次使用：Python 3.10+，建议在虚拟环境中安装
-python -m pip install -e '.[openai]'
-
-# 不需要 API key，先用确定性的离线工具调用检查安装
-python run.py --provider mock --workspace .
-
-# 使用现有 .env（ANTHROPIC_API_KEY、MODEL_ID，可选 ANTHROPIC_BASE_URL）
-python run.py --workspace .
-```
-
-### 装成全局命令（在任意目录下直接 `edacode`）
-
-想在别的项目文件夹里直接敲 `edacode` 唤醒，把它当 CLI 工具装一次即可。推荐用 `uv tool`（等价于 pipx，隔离环境 + 自动放进 PATH 上的 `~/.local/bin`）：
+需要 **Node.js 22.14+**，推荐 Node.js 24 LTS。发布到 npm 后：
 
 ```bash
-# editable：改源码即时生效，适合自己开发时用
-uv tool install --editable /path/to/edacode
-# 或者非 editable（把代码拷进工具环境，项目搬走也不受影响）
-uv tool install /path/to/edacode
-
-# 没有 uv 时用 pipx，或退回到某个已在 PATH 上的 Python
-pipx install --editable /path/to/edacode
-python -m pip install -e /path/to/edacode
+npm install -g edacode
+cd /path/to/your/project
+edacode
 ```
 
-安装工具会提示命令入口所在目录；确保该目录在 PATH 中。使用虚拟环境安装时，需要先激活环境。**当前目录就是工作区**：
+**终端当前目录就是工作区**。全局安装不会把当前目录改成 EdaCode 的安装目录，也不需要给每个项目安装依赖。
 
 ```bash
-cd ~/any/other/project
-edacode                  # 工作区 = 当前目录
-edacode -p "跑一下测试"   # 单次执行
+edacode --version
+edacode --help
+edacode --workspace /path/to/another/project
+edacode -p "检查并修复测试失败"
+edacode --provider mock --json -p "列出文件"  # 不需要密钥的离线安装检查
 ```
 
-配置查找顺序（`--env-file` 显式指定时只用那一份）：
+如果 `edacode` 找不到，检查 npm 全局命令目录是否在 PATH 中：macOS/Linux 为 `npm prefix -g` 输出目录下的 `bin`，Windows 为该输出目录本身。若曾安装 Python 版，先用原工具卸载旧命令（例如 `uv tool uninstall edacode` 或 `pipx uninstall edacode`），避免同名入口遮挡。
+
+```bash
+npm install -g edacode@latest   # 升级
+npm uninstall -g edacode       # 卸载；保留 ~/.edacode 中的配置和会话
+```
+
+尚未发布时，也可从本仓库安装：
+
+```bash
+npm ci
+npm run build
+npm install -g .
+```
+
+## 模型配置
+
+可以先运行 `edacode`，无需预先配置。进入 CLI 后输入：
 
 ```text
-已导出的环境变量    优先级最高
-<当前目录>/.env      项目级
-~/.edacode/.env      用户级，全局兜底；任意目录下都能靠它拿到 key
+/connect
 ```
 
-所以把 key 放到 `~/.edacode/.env` 一次，之后在任何文件夹里 `edacode` 都能直接跑；某个项目想用不同的 key，在它自己的 `.env` 里覆盖即可。
+按提示选择 Anthropic 或 OpenAI 兼容接口，输入 API key 和 Base URL，即可自动获取可用模型列表，按编号或模型 ID 选择。也可留空先保存接口配置，再通过 `/model` 选择模型。API key 输入时隐藏；Base URL 留空使用官方地址。支持根地址、`/v1` 地址或完整的 `/v1/chat/completions`、`/v1/messages` 地址，模型查询与实际推理共用归一化后的地址。
 
-卸载：`uv tool uninstall edacode`（或 `pipx uninstall edacode`）。
-
-已实现 Windows/POSIX 平台分支：文件锁使用 `msvcrt.locking` 或 `fcntl.flock`，进程清理使用 `taskkill /T` 或 `killpg`。Windows 优先探测 bash（可用 `EDACODE_SHELL` 指定），找不到时回退系统 shell；POSIX 使用 `/bin/bash`。本轮运行验证在 macOS 完成，Windows/Linux 尚未实机验证。
-
-`edacode/.env.example` 是配置模板。也支持 OpenAI Chat Completions 兼容接口：安装 `pip install -e '.[openai]'`，设置 `EDACODE_PROVIDER=openai`、`OPENAI_API_KEY` 和 `EDACODE_MODEL`。
-
-会话状态默认保存在 `~/.edacode/projects/<workspace-hash>/sessions/`，可以用 `--resume` 或 `--resume latest` 继续。状态包含对话、工具输出和文件前镜像；分享日志前应检查其中的敏感内容。
-
-## 界面
-
-启动后是 opencode 风格的欢迎屏：方块像素 logo、带左侧色条的输入框、模式/模型行、快捷键提示、Tip，以及底部状态栏（工作区、MCP 数量、版本）。
+配置保存到 `~/.edacode/.env`（Windows 对应 `%USERPROFILE%\.edacode\.env`），当前会话立即生效，配置一次即可跨项目使用。`/connect openai` 或 `/connect anthropic` 可直接选择接口，也可重新运行向导更新配置；Ctrl-C 取消向导且不保存。软件不附带模型服务或 API key。
 
 ```text
-                    █████      █  █████  █████  █████      █  █████
-                    █   █  █████      █  █      █   █  █████  █   █
-                    █████  █   █  █████  █      █   █  █   █  █████
-                    █      █   █  █   █  █      █   █  █   █  █    
-                    █████  █████  █████  █████  █████  █████  █████
-
-    ┃  随便说点什么…  "修复 src 里的 TODO"
-    ┃  Edit  claude-opus-4-6  anthropic
-
-                                     /help 命令    /mode 切换权限    Ctrl-C 退出
-
-    ● Tip 输入 @路径 可以注入文件内容或目录清单
-
- ~/proj  ● 2 MCP  /status                                              0.1.0
+/model                 显示模型列表并按编号或 ID 选择
+/model 2               切换到列表中的第二个模型
+/model your-model-id   直接指定模型 ID，无须查询列表
+/model list            仅显示列表
+/model refresh         重新获取模型列表
 ```
 
-- 界面使用标准库和 ANSI 转义序列，不依赖 TUI 框架；这是逐行交互的 REPL。
-- 模式用颜色区分（Plan 青 / Ask 黄 / Edit 蓝 / Auto 绿）；正文用 16 色 ANSI，跟随终端主题；只有 logo 的竖向渐变是 256 色灰度，针对深色终端调优。
-- 非 tty（管道、重定向）或设置了 `NO_COLOR` 时**自动降级为纯文本**，`python run.py ... > out.txt` 不会混入转义码。
-- `--no-banner` 跳过欢迎屏，只打印一行启动信息，脚本里更清爽。
+模型选择会保存到用户配置，立即生效。列表按当前接口、密钥和地址在本次进程中缓存五分钟，刷新或重新配置后更新。非交互输入只显示列表，不等待选择，可用后续 `/model <编号或 ID>` 切换。
 
-## 交互方式
+模型发现对接 [OpenAI Models API](https://developers.openai.com/api/reference/resources/models/methods/list) 和 [Anthropic Models API](https://platform.claude.com/docs/en/api/models)。列表代表服务返回的模型；具体模型是否支持当前接口和工具调用，以实际请求结果为准。服务未提供列表接口、返回错误或列表为空时，仍可手动输入模型 ID；查询超时十秒（或更短的已配置请求超时），可按 Ctrl-C 中断。
 
-输入自然语言即可让模型检查、修改和验证项目。常用命令：
+也可手动创建配置文件。Anthropic 示例：
+
+```dotenv
+EDACODE_PROVIDER=anthropic
+ANTHROPIC_API_KEY=your-api-key
+EDACODE_MODEL=your-model-id
+# ANTHROPIC_BASE_URL=https://your-compatible-endpoint
+```
+
+OpenAI Chat Completions 兼容接口示例：
+
+```dotenv
+EDACODE_PROVIDER=openai
+OPENAI_API_KEY=your-api-key
+EDACODE_MODEL=your-model-id
+# OPENAI_BASE_URL=https://your-compatible-endpoint/v1
+```
+
+两个 provider 的 SDK 已包含在 npm 依赖中，无需额外安装。完整选项见包中的 `.env.example`；也保留 `MODEL_ID` 作为模型配置兼容项。
+
+配置优先级：
+
+1. 已导出的环境变量。
+2. 工作区根目录 `.env`。
+3. 用户级 `~/.edacode/.env`，只补充前两级没有的变量。
+
+`--env-file /path/to/file` 只加载指定文件，导出的环境变量仍优先。`--home` 或 `EDACODE_HOME` 可修改状态目录。向导保存到用户配置，当前会话使用刚输入的设置，下次启动仍按上述优先级加载。缺少模型或密钥也能进入交互界面，执行任务时会提示 `/connect` 或 `/model`；单次执行 `-p` 缺少配置时仍返回退出码 2。可用 `--provider mock` 离线检查安装；mock 只做确定性的文件列举，不模拟真实编码能力。
+
+## 交互与权限
+
+输入自然语言任务即可开始；使用 `@路径` 引用工作区文件或目录，行尾反斜杠可继续输入下一行。
 
 ```text
 /help
-/mode plan|ask|edit|auto
-/goal pytest -q 退出码必须为 0
 /status
+/connect [anthropic|openai]
+/mode plan|ask|edit|auto
+/model [编号|模型ID|list|refresh]
+/goal <可验证的完成条件>
+/goal clear
+/tools
+/jobs
+/cancel <job_id>
 /diff
 /undo
-/memory add 项目使用 Python 3.10
-/sessions
-/mcp
-/commands list|reload
 /checkpoint [标签]
 /restore [ID|latest]
 /compact
+/clear
+/sessions
+/memory list|add <文本>|clear
+/mcp
+/commands list|reload
 /quit
 ```
 
-四种模式对应不同的执行边界：`plan` 只读，`ask` 每个写入和命令都询问，`edit` 自动写文件但命令询问，`auto` 自动执行。危险 shell 模式（例如 `sudo`、`rm -rf /`、`mkfs`、关机和设备重定向）始终硬拒绝。
+| 模式 | 文件写入 | shell / MCP 启动与调用 |
+| --- | --- | --- |
+| `plan` | 拒绝 | 拒绝 |
+| `ask` | 每次审批 | 每次审批 |
+| `edit`（默认） | 自动执行 | 每次审批 |
+| `auto` | 自动执行 | 自动执行 |
 
-## 自定义命令与上下文引用
+审批展示完整 diff 或操作内容；非交互输入和 `-p` 不会代替用户批准操作。危险 shell 模式始终硬拒绝。权限策略不是操作系统沙箱，shell 仍以当前用户身份运行。
 
-把常用的长 prompt 固化成 Markdown 文件即可当斜杠命令用（借鉴 Gemini CLI 的 custom commands 与 Qwen Code / Claude Code 的 Markdown 命令）：
+已有文件必须先读取才能修改；读取后文件发生变化、审批期间被外部修改或路径越界时拒绝覆盖。文件发现过滤 `.git`、依赖/构建目录、敏感 `.env` 和 `.edacodeignore` 指定项；显式文件读取不受发现过滤影响。
 
-```text
-<workspace>/.edacode/commands/   项目命令（优先级高，可入库共享）
-<home>/commands/                 用户命令（跨项目可用）
+Ctrl-C 在执行任务时取消当前回合并保存会话，在输入处退出。前后台命令默认超时 120 秒、最多四个并发作业、输出上限 2 MB；退出时清理本进程启动的命令和 MCP server。Windows 优先使用 `EDACODE_SHELL` 或 Git Bash，找不到 Bash 时回退 `cmd.exe`。
+
+界面保留像素 logo、输入提示和状态栏。非 TTY、重定向或设置 `NO_COLOR` 时使用纯文本；`--no-banner` 跳过欢迎屏，`--no-stream` 关闭流式输出。
+
+## 会话、检查点和旧数据
+
+状态保存在 `~/.edacode/projects/<工作区哈希>/sessions/`，每个工作区独立。
+
+```bash
+edacode --resume latest
+edacode --resume <session-id>
 ```
 
-- 子目录用 `:` 命名空间：`git/commit.md` → `/git:commit`。
-- 参数：`$ARGUMENTS` / `{{args}}` 注入全部参数，`$1`..`$9` 注入位置参数；正文没有占位符时参数追加到末尾。
-- `@{path}` 注入文件内容或目录清单；`!{cmd}` 注入命令输出。
-- **`!{cmd}` 走完整权限策略**：plan 模式拒绝，ask/edit 模式逐次审批，auto 模式才直接执行。
-- 普通输入里的 `@路径` 也会注入内容；只有能解析到工作区内真实路径的 token 才会替换，`a@b.com` 这类文本不受影响。
+会话包含对话、工具结果、计划、Goal、文件前镜像和检查点。首次实际写文件时保存当前回合起点；`/checkpoint` 可手动记录，`/restore` 回滚文件、计划和 Goal，并在历史分支仍匹配时回滚对话。外部改动的文件跳过，压缩后不错误截断对话。恢复会话不会盲目重放中断时执行状态未知的工具，也不恢复已经结束的后台进程。
 
-`review.md` 示例：
+Node.js 版首次恢复 Python v1 会话时，先将会话目录完整复制到其 `legacy-v1-backup/`，验证旧检查点哈希后写入 v2 格式。中文、浮点数表示、数字键顺序均参与旧哈希验证；无法验证的检查点会拒绝恢复。超出 JavaScript 安全整数范围的旧整数会阻止自动迁移，保留原数据。项目记忆位置保持不变。
+
+这是**单向迁移**，v2 会话由新版继续维护。迁移前结束旧 Python 进程，不要让两版同时操作同一会话；保留原始备份供人工恢复。Python 源码保留在 `src/edacode/` 作参考，旧文档见仓库中的 [Python 版说明](docs/python-reference.md)，均不包含在 npm 包中。
+
+## 自定义命令、项目规范和技能
+
+Markdown 命令从两处加载，同名时项目级优先：
+
+```text
+<工作区>/.edacode/commands/
+<状态目录>/commands/
+```
+
+`git/commit.md` 对应 `/git:commit`。支持 `$ARGUMENTS`、`{{args}}`、`$1`…`$9`、`${1}` 参数，以及 `@{path}` 文件/目录注入和 `!{command}` shell 注入。例如：
 
 ```markdown
 ---
 description: 审查指定文件
 argument-hint: <path>
 ---
-请审查 $1，重点看边界条件和错误处理。
-参考规范：
-@{docs/best-practices.md}
+请审查 $1。
+@{$1}
 ```
 
-只解析原始模板中的注入块，按出现顺序展开一次。文件内容、命令输出和传入参数都不会被再次解释为注入语法。shell 块内的参数会按单个字面量自动转义，例如 `!{git diff -- $1}`；占位符应放在引号外，不支持在 heredoc 中使用。带参数的 shell 模板要求 bash。
+只解释原始模板一次，文件内容、参数和命令输出不会再次变成注入指令；shell 块按模板顺序执行并走权限审批。shell 参数会转义为一个字面量，占位符必须位于引号外；不支持参数化 heredoc。有参数的 shell 模板需要 Bash。
 
-## 外部 MCP 工具
+自动加载工作区根目录的 `AGENTS.md`、`GEMINI.md`、`EDACODE.md`；读取文件时带上子目录 `AGENTS.md`。从 `skills/*/SKILL.md` 和 `.edacode/skills/*/SKILL.md` 发现可按需加载的技能。
 
-在项目根目录或 `.edacode/mcp.json` 放一份配置，EdaCode 启动时会检查权限，再通过 stdio 启动 server 并合并其工具：
+## 外部 MCP
+
+在工作区根目录 `mcp.json` 或 `.edacode/mcp.json` 配置 stdio server，根目录配置优先：
 
 ```json
-{"mcpServers": {"filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]}}}
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/project"]
+    }
+  }
+}
 ```
 
-- 工具名统一为 `mcp__<server>__<tool>`，出现在 `/tools` 里，`/mcp` 查看 server 状态。
-- 握手使用 JSON-RPC over stdio（`initialize` → `notifications/initialized` → `tools/list` → `tools/call`），协议版本 `2024-11-05`。
-- server 进程启动和外部工具调用分别经过权限检查：`plan` 拒绝，`ask`/`edit` 询问，`auto` 自动执行。无交互输入时，需要审批的操作会拒绝。
-- 单个 server 启动失败只记录到 `/mcp`，不影响内置工具和其他 server。
+使用 JSON-RPC over stdio，协议版本 `2024-11-05`。工具命名为 `mcp__<server>__<tool>`；启动和调用分别检查权限，单个 server 失败不影响内置工具及其他 server。只读子 agent 不加载 MCP。
 
-## 检查点与回滚
-
-EdaCode 在每个用户回合开始时记录起点，第一次通过文件工具写入时才保存自动检查点。它将文件、对话、计划、Goal 关联到同一时间点，通过文件前镜像（`changes[].before`）恢复，无需影子 Git 仓库：
-
-```text
-/checkpoint 重构前      手动打一个带标签的检查点
-/restore latest         回滚到最近一次检查点
-/restore <ID>           回滚到指定检查点（用 /restore 列出 ID）
-```
-
-- 检查点记录对话长度及摘要哈希、压缩代数、计划、Goal 和改动条数。回滚后另起分支时，已丢弃分支的检查点会拒绝恢复，避免按相同消息长度截断新工作。
-- **文件回滚**：把检查点之后被改动或新建的文件还原/删除。若某文件在检查点之后被**外部**改过（当前内容与 EdaCode 记录的 after 哈希不一致），则跳过并在结果里列出，不覆盖主人的手改。
-- **对话回滚**：截断到 `messages_len`。如果期间发生过上下文压缩（`generation` 变了），或当前历史比检查点还短，就**拒绝回滚对话**，只回滚文件，避免把压缩后的历史截错。
-- 超过 `CHECKPOINT_KEEP`（30）时优先淘汰旧自动检查点，手动检查点保留，因此总数可能超过 30。
-- `/clear` 会一并清空检查点。
-
-## 已实现的核心
-
-- Anthropic Messages API 和 OpenAI 兼容接口的 provider 适配；网络/限流错误只在没有输出或工具执行前重试。
-- 结构化工具循环：每个 `tool_use` 都对应一个 `tool_result`，工具异常会回传给模型，不会让整个会话崩溃。
-- 工作区边界：文件工具解析真实路径、拒绝软链接越界和 `.git`；文件发现跳过 `.env`、构建目录和 `.edacode`。显式读取路径不使用发现规则，不能把它当作密钥访问隔离。
-- 文件编辑的读取前置、SHA-256 变更检测、唯一匹配、统一 diff、审批后再次冲突检查、原子写入和 `/undo`。
-- 前后台 shell 进程组、超时、2 MB 输出限额、最多四个并发作业、Ctrl-C 清理；重启不会假装恢复后台进程。
-- 项目级 `AGENTS.md`、`GEMINI.md`、`EDACODE.md` 指令和 `skills/*/SKILL.md` 按需加载。
-- `update_plan` 计划、跨会话用户记忆、长结果归档、上下文压缩、会话文件锁和中断后的未完成工具调用标记。
-- `delegate` 只读调查子 agent，以及独立 Goal 判断器；Goal 未完成时自动继续，达到 `max_turns` 后把控制权交还用户。
-- 外部 MCP（stdio）工具接入：`mcp.json` 配置、握手、工具发现与调用，命名空间隔离且默认需要审批。
-- 自定义斜杠命令（Markdown，项目/用户两级）与 `@文件` / `!{命令}` 上下文注入；shell 注入复用同一套审批。
-- 回合级检查点与 `/restore`：文件、对话、计划、Goal 一起回滚，不依赖 Git；外部改过的文件跳过不覆盖。
-- glob 语义正确：`**` 递归、`*` 不跨目录，`src/**/*.py` 这类 pattern 在 Windows 上也匹配。
-- 跨平台：文件锁、shell 探测、进程树终止在 Windows 与 POSIX 上都可用，平台分支集中在 `compat.py`。
-- 可装成全局 CLI（`uv tool install` / `pipx` / `pip install -e`），在任意目录下 `edacode` 直接以当前目录为工作区；配置按 `<当前目录>/.env` → `~/.edacode/.env` 回退，key 放全局一次即可到处用。
-- opencode 风格终端界面：方块像素 logo、带色条的输入框、模式/模型行、底部状态栏；纯 ANSI 实现、无 TUI 依赖，非 tty 或 `NO_COLOR` 时自动降级为纯文本。
-- `--provider mock` 离线冒烟路径，方便在没有模型和密钥时验证文件、会话和工具边界。
-
-这不是操作系统级沙箱。Bash 仍以当前用户身份运行在工作区目录；`auto` 只适合你信任的项目。需要更强隔离时应在容器、虚拟机或 Codex/Gemini 等自带 sandbox 中运行。
-
-## 从 01.py–17.py 提炼的结构
-
-原脚本保留在上级目录；下表与 [逐脚本记录](docs/lessons.md) 说明它们和 EdaCode 模块的对应关系。
-
-| 学习脚本 | 主要经验 | EdaCode 的落点 |
-| --- | --- | --- |
-| 01–02 | 最小 tool loop、专用读写工具、工作区路径 | `providers.py`、`tools.py` |
-| 03–04 | 硬拒绝、审批闸门和 hooks | `permissions.py`、`engine.py` |
-| 05–07 | Todo、子 agent、Skill 目录按需加载 | `update_plan`、`delegate`、`load_skill` |
-| 08–09 | 工具结果归档、消息压缩、跨会话 memory | `Store`、`Memory`、`Engine._context` |
-| 10 | 持久任务图和原子 JSON | 保留为下一阶段扩展点；当前计划先用 `update_plan` |
-| 11–12 | 后台进程组、超时和调度 | `processes.py`；Cron 暂不伪装成已实现 |
-| 13–15 | worktree、团队协议、MCP、统一 harness | `mcp.py` 已接入 stdio MCP（命名空间 + 审批）；worktree/团队与统一 harness 仍待下一版 |
-| 16 | 固定 workflow、schema 校验、journal resume | 会话 snapshot、事件日志和结构化 provider |
-| 17 | 主模型提出停止，独立判断器检查 Goal | `GoalEvaluator` 和 `/goal` |
-
-## 参考的开源 agent 设计
-
-- [OpenAI Codex CLI](https://github.com/openai/codex)：本地终端 agent、`AGENTS.md` 项目指令、审批与执行隔离的区分。
-- [OpenCode](https://github.com/anomalyco/opencode)：内置 build/plan 主 agent 与 general 子 agent 的职责分离启发了只读 `plan` 和 `delegate`。
-- [Gemini CLI](https://github.com/google-gemini/gemini-cli)：TOML custom commands、参数和上下文注入、checkpoint/restore、项目指令、MCP 和 headless 入口；EdaCode 的命令文件选择 Markdown。
-- [Qwen Code](https://github.com/QwenLM/qwen-code)：独立上下文 subagent、项目级 Markdown 命令与 skill、多协议 provider 分层、headless 与 session 管理。
-- [Z.ai ZCode CLI](https://github.com/zai-org/ZCode/blob/main/apps/zcode-cli/README.md)：CLI/core/UI 分层，插件可提供 skills、commands 和 MCP server。
-- [Softorize/zcode](https://github.com/Softorize/zcode)：另一个同名 Zig 项目，其 README 描述了结构化输出、mock provider、验证后结束与 headless 入口。这里仅参考这些机制，不将其能力归给 Z.ai 项目。
-
-EdaCode 采纳的是可解释的机制，而不是照搬实现：
-
-| 机制 | 来源 | EdaCode 落点 |
-| --- | --- | --- |
-| 项目指令文件分层 | Codex / Gemini / Qwen | `AGENTS.md`、`GEMINI.md`、`EDACODE.md` |
-| 权限分层（只读/审批/自动） | Codex / OpenCode | `plan/ask/edit/auto` + 硬拒绝 |
-| 只读调查子 agent | OpenCode / Qwen | `delegate`（独立 Store、只读工具集） |
-| 自定义命令 + 上下文注入 | Gemini CLI / Qwen Code | `commands.py`（`$ARGUMENTS`、`@{path}`、`!{cmd}`、`:` 命名空间） |
-| `@` 文件引用 | Gemini CLI | `commands.inject_references` |
-| 回合级 checkpoint / restore | Gemini CLI | `storage.py`（复用 `changes[].before`，不依赖 Git） |
-| MCP 外部工具 | Gemini / Qwen / Codex | `mcp.py`（stdio，命名空间 + 审批） |
-| 独立 Goal 判断器 | 课程 17.py | `GoalEvaluator` |
-| mock provider + headless JSON | Softorize/zcode | `--provider mock`、`--json -p` |
-
-这些项目的许可证、模型能力和沙箱实现各不相同；EdaCode 只采用公开文档中可解释的架构方法，没有复制其源码或品牌。
-
-## 验证
-
-在项目目录下执行（Windows 的 Git Bash 与 macOS/Linux 通用）：
+## 开发和验证
 
 ```bash
-# 全部单元测试（含会话锁、shell、进程超时、MCP 端到端、自定义命令与 @ 引用、配置回退、界面渲染）
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests -v
-
-# 界面预览：管道模式下会自动降级为纯文本
-printf '/quit\n' | python run.py --provider mock --workspace . --no-stream
-
-# 离线冒烟：单次执行 + JSON 输出
-python run.py --provider mock --workspace . --json -p "列出当前文件"
-
-# 离线冒烟：交互命令流
-printf '/status\n/mcp\n/commands list\n/tools\n/quit\n' | python run.py --provider mock --workspace . --no-stream
-
-# 全局命令验证：换到无关目录仍能启动（先装好 uv tool install --editable）
-cd /tmp && edacode --version && edacode --provider mock --json -p "列出当前文件"
+npm ci
+npm test                # 编译、单元和本地 HTTP/SSE/MCP 集成测试
+npm run test:package    # 真实 tarball、隔离全局安装、跨目录启动、卸载
+npm start -- --provider mock
 ```
 
-## 目录
+源码在 `src/node/`，编译产物在 `dist/`。测试使用本地模拟服务，不需要真实模型密钥，也不需要 Python。GitHub Actions 配置了 macOS/Linux/Windows × Node.js 22.14/24 的测试与安装包验证矩阵；实际运行结果以 Actions 为准。
 
-```text
-edacode/
-  run.py                  # 源码 checkout 直接运行
-  pyproject.toml          # 可编辑安装和 edacode 命令
-  LICENSE                 # MIT
-  .env.example
-  src/edacode/
-    cli.py                # REPL 和 slash 命令
-    ui.py                 # opencode 风格欢迎屏、状态栏、配色与降级
-    config.py             # provider、模式、上限配置
-    compat.py             # 文件锁 / shell 探测 / 进程树终止的平台分支
-    providers.py          # Anthropic/OpenAI/mock
-    engine.py             # 主循环、Goal、memory、上下文
-    context.py            # 工具事务配对、摘要与可恢复压缩
-    tools.py              # 工具 schema、glob 匹配和实现
-    commands.py           # 自定义斜杠命令与 @ / !{} 注入
-    mcp.py                # 外部 MCP stdio 客户端
-    permissions.py        # policy gate
-    processes.py          # 进程组和后台 job
-    storage.py            # snapshot、checkpoint、events、artifact、锁
-  tests/
-    test_edacode.py       # 单元与端到端测试
-    test_runtime_regressions.py # 中断、Goal、上下文、进程及命令回归
-    test_provider_http.py # 真实 SDK + 本地 HTTP/SSE 模拟服务
-    mcp_echo_server.py    # 测试用的最小 MCP server
-  docs/
-    lessons.md            # 01.py–17.py 逐脚本经验映射
-    research.md           # GitHub 开源 agent 调研与取舍
+## 发布到 npm
+
+推送 GitHub 和发布 npm 是两个步骤。首次发布者需拥有 npm 账号，并按 npm 当前要求完成账号及发布验证。参考 [npm 官方发布指南](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/)。
+
+在仓库根目录执行：
+
+```bash
+npm ci
+npm test
+npm run test:package
+npm login --registry=https://registry.npmjs.org/
+npm whoami --registry=https://registry.npmjs.org/
+npm publish --access public
 ```
 
-## 当前边界
+`prepublishOnly` 会再次运行测试和安装包检查，`prepack` 会构建运行产物。只打包 `dist/`、配置示例、README、许可证及 npm 必要的包元数据，不发布密钥、会话、Python 源码和开发记录。用 `npm pack --dry-run` 可查看文件清单。
 
-已实现：stdio MCP、自定义命令与 `@` / `!{}` 注入、回合级 checkpoint/restore、Windows/POSIX 平台分支。验证范围与命令见 [验收记录](docs/validation.md)。
-
-未实现（保留边界，避免把"有一个同名工具"误报成完整功能）：
-
-- `10.py` 的依赖任务图、`12.py` 的 Cron、`13.py` 的多队友 worktree、`15.py` 的完整集成：都需要独立生命周期和更严格的审批测试。
-- MCP 只做了 stdio，HTTP/SSE transport 未实现。
-- checkpoint/restore 只覆盖 EdaCode 自己写过的文件；通过 shell 命令（`git`、脚本、外部编辑器）造成的改动不在快照里，`/restore` 不会还原它们。
-- 没有 OS 级沙箱：`auto` 模式下 shell 以当前用户身份运行在工作区目录，只适合信任的项目。需要更强隔离时应在容器、虚拟机或自带 sandbox 的 agent 中运行。
+首次包名使用 `edacode`；发布时若名字已被占用，需要先解决包名或所有权问题。CI 只构建和测试，不自动发布。
 
 ## 许可证
 
-MIT，见 [LICENSE](LICENSE)。
+MIT。架构背景和早期研究保留在仓库的 `docs/` 中。

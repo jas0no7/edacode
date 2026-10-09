@@ -1,0 +1,17 @@
+{
+  "id": "20261009-093000-abcdef",
+  "time": 1.0,
+  "generation": 0,
+  "messages_len": 4,
+  "messages_digest": "f0f733b7a8eeb44ef90eef0ba0ccfa32f6b05553a6cb1caa733d8b5b78f7b0e0",
+  "todos": [
+    {
+      "step": "检查",
+      "status": "completed"
+    }
+  ],
+  "goal": null,
+  "changes_len": 0,
+  "kind": "manual",
+  "label": "旧检查点"
+}
