@@ -12,7 +12,8 @@ import { Store, encode, listSessions } from './storage.js';
 import { discoverCommands, expand, injectReferences } from './commands.js';
 import { Palette, supportsColor, safeTerminal, promptText, VERSION, welcome } from './ui.js';
 import { FullScreen, type PromptInput } from './tui.js';
-import type { Config, Result } from './types.js';
+import { describeApproval } from './approval.js';
+import type { ApprovalDecision, Config, Result } from './types.js';
 export function parseArgs(argv: string[]): Record<string, any> {
   const args: Record<string, any> = {workspace: '.', query: []};
   const flags = new Set(['json', 'no-stream', 'no-banner', 'no-tui', 'version', 'help']);
@@ -91,16 +92,18 @@ export class Terminal {
   constructor(public input: PromptInput, public quiet = false, public interactive = true, public palette = new Palette(false), public signal: () => AbortSignal | undefined = () => undefined) {}
   display = (kind: string, value: string): void => {
     if (!this.quiet && this.input instanceof FullScreen) { this.input.display(kind, value); return; }
+    if (kind === 'assistant_phase') return;
     if (this.quiet) return; const text = safeTerminal(value), p = this.palette;
     if (kind === 'stream') { if (!this.streaming) { process.stdout.write('\n' + p.accent + '助手' + p.reset + ' '); this.streaming = true; } process.stdout.write(text); }
     else if (kind === 'stream_end') { this.streaming = false; process.stdout.write('\n'); }
     else if (kind === 'assistant') process.stdout.write('\n' + p.accent + '助手' + p.reset + ' ' + text + '\n');
     else process.stderr.write(`\n${kind === 'error' ? p.red : p.muted}[${kind}]${p.reset} ${text}\n`);
   };
-  confirm = async (name: string, detail: string): Promise<boolean> => {
+  confirm = async (name: string, detail: string): Promise<ApprovalDecision> => {
     if (!this.interactive || !process.stdin.isTTY) return false;
-    if (this.input instanceof FullScreen) this.input.approval(name, detail);
-    else process.stderr.write(`\n请求执行 ${safeTerminal(name)}：\n${safeTerminal(detail)}\n`);
+    if (this.input instanceof FullScreen) return this.input.confirmApproval(name, detail, this.signal());
+    const description = describeApproval(name, detail);
+    process.stderr.write(safeTerminal(`\n${description.title}：\n${description.summary.map(line => '· ' + line).join('\n')}\n\n${description.details}\n`));
     const answer = await this.input.read('允许此次操作？[y/N] ', this.signal()); return ['y', 'yes'].includes(answer?.trim().toLowerCase() || '');
   };
 }
@@ -113,10 +116,11 @@ export async function command(text: string, config: Config, store: Store, engine
     return connect(rest || undefined);
   }
   if (name === '/status') return encode({session: store.id, workspace: config.workspace, mode: engine.policy.mode, provider: config.provider, model: config.model,
-    messages: engine.messages.length, usage: store.data.usage, goal: engine.goal, todos: store.data.todos, checkpoints: store.data.checkpoints?.length || 0, changes: store.data.changes.length});
+    base_url: config.base_url, timeout_seconds: config.timeout, messages: engine.messages.length, usage: store.data.usage, goal: engine.goal, todos: store.data.todos, checkpoints: store.data.checkpoints?.length || 0, changes: store.data.changes.length});
   if (name === '/mode') {
     if (!['plan', 'ask', 'edit', 'auto'].includes(rest)) throw new Error('用法：/mode plan|ask|edit|auto');
     config.mode = engine.policy.mode = rest as Config['mode']; store.event('mode_changed', {mode: rest});
+    engine.policy.allowSessionEdits = false;
     return '权限模式：' + rest + (rest === 'auto' ? '；shell 以当前用户权限执行，工作目录不是沙箱。' : '');
   }
   if (name === '/model') return chooseModel(engine, read, rest);
@@ -157,6 +161,7 @@ export async function command(text: string, config: Config, store: Store, engine
     return [...engine.tools.commands].sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `- /${key}  [${item.source}] ${item.description}` + (item.argument_hint ? `  参数：${item.argument_hint}` : '')).join('\n') || '无自定义命令；在 .edacode/commands/ 或 <home>/commands/ 放 Markdown 文件';
   }
   if (name === '/clear') {
+    engine.policy.allowSessionEdits = false;
     const archive = store.artifact(encode(engine.messages), 'history'); engine.messages.splice(0); store.data.todos = []; store.data.checkpoints = []; engine.clearGoal(); store.save(); return '对话已清空，旧消息归档：' + archive;
   }
   const custom = engine.tools.commands.get(name.slice(1));
@@ -196,7 +201,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       try {
         let result = text.startsWith('/') ? await command(text, config, store!, engine!, args.prompt === undefined ? async provider => {
           if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('/connect 需要交互式终端；请直接运行 edacode，或使用 .env 配置');
-          return connectModel(engine!, (prompt, secret) => input.read(prompt, engine!.signal, secret), provider);
+          return connectModel(engine!, (prompt, secret) => input.read(prompt, engine!.signal, secret), provider,
+            screen ? defaults => screen.configureConnection(defaults, engine!.signal) : undefined);
         } : undefined, args.prompt === undefined && process.stdin.isTTY && process.stdout.isTTY
           ? (prompt, secret) => input.read(prompt, engine!.signal, secret) : undefined) : await engine!.run(injectReferences(text, engine!.tools));
         if (typeof result === 'string') { terminal.display('info', result); result = {status: 'completed', text: result, session: store!.id}; }
@@ -205,7 +211,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       } catch (error) {
         if (engine!.signal.aborted) { await engine!.tools.cancelRunning(); store!.repairPending(); store!.save(); }
         const result = {status: engine!.signal.aborted ? 'cancelled' : 'error', text: '', reason: engine!.errorText(error), session: store!.id}; terminal.display('error', result.reason); return result;
-      } finally { busy = false; }
+      } finally { busy = false; screen?.finishTask(); }
     };
     if (args.prompt !== undefined) {
       const result = await submit(args.prompt); if (args.json) console.log(JSON.stringify({...result, usage: store.data.usage}));

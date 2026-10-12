@@ -8,6 +8,9 @@ import type { Engine } from './engine.js';
 import type { Config } from './types.js';
 
 export type ConnectionPrompt = (prompt: string, secret?: boolean) => Promise<string | undefined>;
+export type ConnectionFields = {provider: 'openai' | 'anthropic'; base_url: string; api_key: string};
+export type ConnectionDefaults = {provider: ConnectionFields['provider']; base_url: string; has_key: boolean};
+export type ConnectionForm = (defaults: ConnectionDefaults) => Promise<ConnectionFields | undefined>;
 const begin = '# BEGIN EDACODE CONNECTION';
 const end = '# END EDACODE CONNECTION';
 const managed = /^# BEGIN EDACODE CONNECTION\r?\n[\s\S]*?^# END EDACODE CONNECTION(?:\r?\n|$)/m;
@@ -33,7 +36,7 @@ export function saveConnection(config: Config): string {
   atomicWrite(target, remainder + (remainder && !remainder.endsWith('\n') ? '\n' : '') + block, 0o600);
   return target;
 }
-export async function connectModel(engine: Engine, read: ConnectionPrompt, selected?: string): Promise<string> {
+export async function connectModel(engine: Engine, read: ConnectionPrompt, selected?: string, form?: ConnectionForm): Promise<string> {
   const ask = async (prompt: string, secret = false): Promise<string> => {
     engine.signal.throwIfAborted();
     const answer = await read(prompt, secret);
@@ -42,17 +45,31 @@ export async function connectModel(engine: Engine, read: ConnectionPrompt, selec
     return answer.trim();
   };
   const current = engine.config;
-  const choice = selected || await ask(`模型接口：1) Anthropic  2) OpenAI 兼容 [${current.provider === 'openai' ? '2' : '1'}]：`);
-  const normalized = choice.toLowerCase();
-  const provider = ['1', 'anthropic'].includes(normalized) ? 'anthropic' : ['2', 'openai'].includes(normalized) ? 'openai'
-    : !choice ? current.provider === 'openai' ? 'openai' : 'anthropic' : undefined;
-  if (!provider) throw new Error('请选择 1 / 2 或 anthropic / openai');
+  const preferred = selected || (current.api_key && current.provider !== 'mock' ? current.provider : 'openai');
+  if (!['openai', 'anthropic'].includes(preferred)) throw new Error('请选择 anthropic / openai');
+  const defaults: ConnectionDefaults = {provider: preferred as ConnectionFields['provider'],
+    base_url: preferred === current.provider ? current.base_url || '' : '', has_key: preferred === current.provider && !!current.api_key};
+  let fields: ConnectionFields;
+  if (form) {
+    const answer = await form(defaults); engine.signal.throwIfAborted();
+    if (!answer) throw new Error('配置已取消，未保存');
+    fields = answer;
+  } else {
+    const base_url = await ask(`Base URL [${defaults.base_url || '官方默认地址'}]（留空保留，输入 - 恢复官方地址）：`);
+    const api_key = await ask(`API key（输入隐藏${defaults.has_key ? '，留空保留已有密钥' : ''}）：`, true);
+    const choice = selected || await ask(`接口协议：1) OpenAI 兼容  2) Anthropic [${defaults.provider === 'openai' ? '1' : '2'}]：`);
+    const provider = ['1', 'openai'].includes(choice.toLowerCase()) ? 'openai' : ['2', 'anthropic'].includes(choice.toLowerCase()) ? 'anthropic' : !choice ? defaults.provider : undefined;
+    if (!provider) throw new Error('请选择 1 / 2 或 openai / anthropic');
+    fields = {provider, base_url, api_key};
+  }
+  const {provider} = fields;
+  if (!['openai', 'anthropic'].includes(provider)) throw new Error('请选择 openai / anthropic');
   const same = provider === current.provider;
-  const api_key = await ask(`API key（输入隐藏${same && current.api_key ? '，留空保留已有密钥' : ''}）：`, true) || (same ? current.api_key : '');
+  const api_key = fields.api_key.trim() || (same ? current.api_key : '');
   if (!api_key) throw new Error('API key 不能为空，未保存');
   envValue(api_key);
   const base = same ? current.base_url : undefined;
-  const entered = await ask(`Base URL [${base || '官方默认地址'}]（留空保留，输入 - 恢复官方地址）：`);
+  const entered = fields.base_url.trim();
   const base_url = normalizeBaseURL(provider, entered === '-' ? undefined : entered || base);
   const next: Config = {...current, provider, api_key, base_url, model: same ? current.model : ''};
   engine.display('info', '正在获取可用模型…');

@@ -32,9 +32,25 @@ export function openaiMessages(system: string, messages: Message[]): any[] {
     return row;
   })];
 }
+function requestFailure(error: any): {transient: boolean; timeout: boolean; serviceTimeout: boolean} {
+  // 两个 SDK 的错误继承 Error，但 name 通常仍是 "Error"；不能靠 name 判断。
+  const apiError = error instanceof Anthropic.APIError || error instanceof OpenAI.APIError;
+  const connection = error instanceof Anthropic.APIConnectionError || error instanceof OpenAI.APIConnectionError;
+  const clientTimeout = error instanceof Anthropic.APIConnectionTimeoutError || error instanceof OpenAI.APIConnectionTimeoutError;
+  const type = error?.type || error?.code || error?.error?.error?.type || error?.error?.type;
+  const message = error?.error?.error?.message || error?.error?.message || error?.message || '';
+  // 网关也可能在 HTTP 200 的 SSE error 事件中报告超时，没有 HTTP status。
+  const serviceTimeout = [408, 504].includes(error?.status) || (apiError && !error.status &&
+    (['timeout_error', 'request_timeout', 'request_timeout_error', 'gateway_timeout'].includes(type) ||
+      ((!type || ['error', 'api_error', 'server_error'].includes(type)) && /\b(?:timed?\s*out|timeout)\b/i.test(message))) && !connection);
+  return {timeout: clientTimeout || serviceTimeout, serviceTimeout,
+    transient: connection || serviceTimeout || [408, 429, 500, 502, 503, 504, 529].includes(error?.status) ||
+      (apiError && !error.status && ['overloaded_error', 'api_error', 'rate_limit_error'].includes(type))};
+}
+export class ModelRequestTimeoutError extends Error {}
 export class Provider implements ProviderLike {
   client?: Anthropic | OpenAI;
-  constructor(public config: Config) {}
+  constructor(public config: Config, private onRetry?: (message: string) => void) {}
   async complete(system: string, messages: Message[], tools: ToolSpec[], onText?: (text: string) => void, signal?: AbortSignal): Promise<Reply> {
     requireModelConfig(this.config);
     if (!this.client) {
@@ -48,8 +64,17 @@ export class Provider implements ProviderLike {
       try { return this.config.provider === 'anthropic' ? await this.anthropic(system, messages, tools, emit, signal) : await this.openai(system, messages, tools, emit, signal); }
       catch (error: any) {
         cancelled(signal);
-        const transient = [408, 429, 500, 502, 503, 504, 529].includes(error.status) || ['APIConnectionError', 'APIConnectionTimeoutError', 'APITimeoutError'].includes(error.name);
-        if (!transient || emitted || attempt === 2) throw error;
+        const failure = requestFailure(error);
+        if (!failure.transient || emitted || attempt === 2) {
+          if (failure.timeout) {
+            const source = failure.serviceTimeout ? '模型服务返回超时' : '模型连接等待超时';
+            const detail = failure.serviceTimeout ? '网关可能有更短的超时限制，可用 /model 切换模型或稍后重试。'
+              : '可检查网络，或在 .env 中设置 EDACODE_TIMEOUT=300 后重启；也可用 /model 切换模型。';
+            throw new ModelRequestTimeoutError(`${source}（已尝试 ${attempt + 1} 次；本机超时设置 ${this.config.timeout} 秒）。\n${detail}`, {cause: error});
+          }
+          throw error;
+        }
+        this.onRetry?.(`${failure.timeout ? '模型请求超时' : '模型连接或服务暂时不可用'}，${2 ** attempt} 秒后重试（第 ${attempt + 2}/3 次）；Ctrl-C 可中断。`);
         await delay(1000 * 2 ** attempt, undefined, {signal});
       }
     }
@@ -64,6 +89,12 @@ export class Provider implements ProviderLike {
       const stream = client.messages.stream(params, {signal}); stream.on('text', onText);
       try { response = await stream.finalMessage(); } finally { stream.abort(); }
     } else response = await client.messages.create(params, {signal});
+    if (response.stop_reason === 'refusal') {
+      const detail = response.stop_details;
+      const category = typeof detail?.category === 'string' ? `；category=${detail.category.slice(0, 80)}` : '';
+      const explanation = typeof detail?.explanation === 'string' ? `\n服务返回的说明：${detail.explanation.slice(0, 600)}` : '';
+      throw new Error(`模型服务拒绝了请求（stop_reason=refusal${category}），这不是空回复或工具调用格式错误。${explanation}\n请联系模型服务提供方检查该模型渠道或账号限制。`);
+    }
     const text = response.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n');
     const calls = response.content.filter((b: any) => b.type === 'tool_use').map((b: any) => ({id: b.id, name: b.name, arguments: b.input}));
     const usage = response.usage;
@@ -110,5 +141,5 @@ export class MockProvider implements ProviderLike {
   }
   close(): void {}
 }
-export const makeProvider = (config: Config): ProviderLike => config.provider === 'mock' ? new MockProvider() : new Provider(config);
+export const makeProvider = (config: Config, onRetry?: (message: string) => void): ProviderLike => config.provider === 'mock' ? new MockProvider() : new Provider(config, onRetry);
 export { Reply };

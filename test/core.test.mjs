@@ -77,6 +77,23 @@ test('四种权限策略和无交互审批拒绝', async () => {
   }
   const approved = new Policy('ask', () => true); await approved.authorize('shell');
 });
+test('本会话文件授权只放行写文件，不授权 shell/MCP、不绕过 plan 或读取检查', async t => {
+  const f = await fixture(t, {config: {mode: 'ask'}}); let approvals = 0;
+  f.engine.policy.confirm = name => { approvals++; return name === 'write_file' ? 'session_edits' : false; };
+  assert.equal((await f.tools.call('write_file', {path: 'one.txt', content: 'one'}))[1], false);
+  assert.equal((await f.tools.call('write_file', {path: 'two.txt', content: 'two'}))[1], false); assert.equal(approvals, 1);
+  f.write('external.txt', 'external'); assert.equal((await f.tools.call('write_file', {path: 'external.txt', content: 'overwrite'}))[1], true);
+  assert.equal(f.read('external.txt'), 'external');
+  await assert.rejects(f.engine.policy.authorize('shell'), /未批准/); await assert.rejects(f.engine.policy.authorize('mcp_start'), /未批准/);
+  f.engine.policy.mode = 'plan'; await assert.rejects(f.engine.policy.authorize('write_file'), /plan 模式/);
+  const fresh = new Policy('ask'); await assert.rejects(fresh.authorize('write_file'), /未批准/);
+  const wrongTool = new Policy('ask', () => 'session_edits'); await assert.rejects(wrongTool.authorize('shell'), /未批准/);
+});
+test('切换权限模式和清空对话后撤销本会话文件授权', async t => {
+  const f = await fixture(t, {config: {mode: 'ask'}});
+  f.engine.policy.allowSessionEdits = true; await command('/mode ask', f.config, f.store, f.engine); assert.equal(f.engine.policy.allowSessionEdits, false);
+  f.engine.policy.allowSessionEdits = true; await command('/clear', f.config, f.store, f.engine); assert.equal(f.engine.policy.allowSessionEdits, false);
+});
 test('危险命令在 auto 也不运行', async t => {
   const f = await fixture(t);
   for (const command of ['  sudo\tshutdown now', 'rm -rf /', 'mkfs x']) { const [out, error] = await f.tools.call('shell', {command}); assert.equal(error, true); assert.match(out, /硬拒绝/); }

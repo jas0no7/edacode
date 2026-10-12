@@ -47,7 +47,7 @@ test('向导保存全局配置并立即切换 provider，凭据不进入会话',
   const f = await fixture(t);
   f.write('.state/.env', '# existing comment\nEDACODE_TIMEOUT=45\nOPENAI_BASE_URL=https://old.example/v1\n');
   const key = 'local-only-#-$-中文-"-test';
-  const input = answers('2', key, 'https://gateway.example/v1', 'my-model');
+  const input = answers('https://gateway.example/v1', key, '1', 'my-model');
   const output = await connectModel(f.engine, input.read);
   assert.equal(f.config.provider, 'openai'); assert.equal(f.config.api_key, key);
   assert.ok(f.engine.provider instanceof Provider); assert.equal(f.engine.evaluator.provider, f.engine.provider);
@@ -62,10 +62,10 @@ test('向导保存全局配置并立即切换 provider，凭据不进入会话',
 });
 test('重复连接可保留已有密钥并重置 Base URL，保留另一接口配置', async t => {
   const f = await fixture(t);
-  await connectModel(f.engine, answers('one-key', 'https://gateway.example/v1', 'one-model').read, 'openai');
-  await connectModel(f.engine, answers('', '-', '').read, 'openai');
+  await connectModel(f.engine, answers('https://gateway.example/v1', 'one-key', 'one-model').read, 'openai');
+  await connectModel(f.engine, answers('-', '', '').read, 'openai');
   assert.equal(f.config.api_key, 'one-key'); assert.equal(f.config.base_url, undefined);
-  await connectModel(f.engine, answers('two-key', '', 'two-model').read, 'anthropic');
+  await connectModel(f.engine, answers('', 'two-key', 'two-model').read, 'anthropic');
   const env = f.read('.state/.env'); assert.equal((env.match(/# BEGIN EDACODE CONNECTION/g) || []).length, 1);
   const openai = loadConfig({workspace: f.root, home: f.config.home, provider: 'openai'}, {});
   assert.equal(openai.api_key, 'one-key'); assert.equal(openai.base_url, undefined);
@@ -74,7 +74,7 @@ test('重复连接可保留已有密钥并重置 Base URL，保留另一接口�
 test('配置取消、错误地址、空密钥及控制字符均不修改原配置', async t => {
   const f = await fixture(t); f.write('.state/.env', '# unchanged\nEDACODE_TIMEOUT=90\n');
   const original = f.read('.state/.env'), previous = f.engine.provider;
-  for (const values of [[undefined], ['key', undefined], ['key', '', undefined], ['key', 'file:///tmp', 'model'], ['', '', 'model'], ['key\ninjected', '', 'model']]) {
+  for (const values of [[undefined], ['', undefined], ['', 'key', undefined], ['file:///tmp', 'key', 'model'], ['', '', 'model'], ['', 'key\ninjected', 'model']]) {
     await assert.rejects(connectModel(f.engine, answers(...values).read, 'openai'));
     assert.equal(f.read('.state/.env'), original); assert.equal(f.engine.provider, previous); assert.equal(f.config.provider, 'mock');
   }
@@ -94,7 +94,7 @@ test('连接后首个任务和重新连接使用新的密钥、地址与模型',
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
   for (const index of [1, 2]) {
-    await connectModel(f.engine, answers(`fake-key-${index}`, `http://127.0.0.1:${server.address().port}/v${index}`, `test-model-${index}`).read, 'openai');
+    await connectModel(f.engine, answers(`http://127.0.0.1:${server.address().port}/v${index}`, `fake-key-${index}`, `test-model-${index}`).read, 'openai');
     const result = await f.engine.run('hello'); assert.equal(result.status, 'completed', result.reason);
   }
   assert.deepEqual(requests.map(x => [x.url, x.auth, x.body.model]), [
@@ -105,4 +105,20 @@ test('缺少配置时可创建引擎，模型请求之前不初始化 SDK', asyn
   assert.equal(f.engine.provider.client, undefined);
   await assert.rejects(f.engine.provider.complete('', [], []), /\/connect/);
   assert.equal(f.engine.provider.client, undefined);
+});
+test('/connect 表单先收集地址和密钥，再用选定协议获取模型，取消不保存', async t => {
+  const f = await fixture(t), input = answers('1'), requests = [];
+  f.engine.modelCatalog = new ModelCatalog(async config => { requests.push({...config}); return [{id: 'form-model', name: 'Form Model'}]; });
+  const output = await connectModel(f.engine, input.read, undefined, async defaults => {
+    assert.deepEqual(defaults, {provider: 'openai', base_url: '', has_key: false});
+    return {provider: 'openai', base_url: 'https://gateway.example/v1/chat/completions', api_key: 'form-secret'};
+  });
+  assert.equal(requests[0].api_key, 'form-secret'); assert.equal(requests[0].base_url, 'https://gateway.example/v1');
+  assert.equal(f.config.model, 'form-model'); assert.ok(!output.includes('form-secret'));
+  assert.equal(input.prompts.length, 1); assert.match(input.prompts[0].prompt, /选择模型/);
+  const saved = f.read('.state/.env');
+  await assert.rejects(connectModel(f.engine, input.read, undefined, async defaults => {
+    assert.equal(defaults.has_key, true); assert.ok(!JSON.stringify(defaults).includes('form-secret')); return undefined;
+  }), /取消/);
+  assert.equal(f.read('.state/.env'), saved);
 });

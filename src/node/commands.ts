@@ -90,14 +90,15 @@ function listing(tools: Tools, value: string): string {
   for (const file of tools.files()) if (!prefix || file.startsWith(prefix + '/')) { rows.push(file); if (rows.length >= 500) break; }
   return `\n[目录 ${value} 共 ${rows.length} 项]\n` + rows.join('\n');
 }
-function fileBlock(value: string, tools: Tools): string {
-  const target = value.trim();
+function fileBlock(value: string, tools: Tools, trim = true): string {
+  const target = trim ? value.trim() : value;
   try { return fs.statSync(tools.path(target)).isDirectory() ? listing(tools, target) : `\n[文件 ${target}]\n` + tools.readText(target); }
   catch (error) { return `[@${target} 无法注入：${error}]`; }
 }
 async function shellBlock(command: string, tools: Tools, display: Display): Promise<string> {
   command = command.trim(); display('tool', '自定义命令注入 shell：' + command);
   const [output, error] = await tools.call('shell', {command});
+  display('result', `shell${error ? ' [失败]' : ''}: ${output.slice(0, 1200)}`);
   return `\n[命令 \`${command}\` 输出${error ? '[退出状态：失败]' : ''}]\n${output}`;
 }
 export function injectFiles(text: string, tools: Tools): string {
@@ -110,9 +111,11 @@ export async function injectShell(text: string, tools: Tools, display: Display =
   return pieces.join('') + text.slice(cursor);
 }
 export function injectReferences(text: string, tools: Tools): string {
-  return text.replace(/(?<![\p{L}\p{N}_@])@([^\s@]+)/gu, match => {
-    const token = match.slice(1).replace(/[.,;:!?，。；：！？]+$/, ''); if (!token || token.startsWith('{')) return match;
-    try { const target = tools.path(token); if (!fs.existsSync(target)) return match; return fileBlock(token, tools); } catch { return match; }
+  return text.replace(/(?<![\p{L}\p{N}_@])@("(?:\\.|[^"\\])*"|[^\s@"]+)/gu, match => {
+    let token: string;
+    try { token = match.startsWith('@"') ? JSON.parse(match.slice(1)) : match.slice(1).replace(/[.,;:!?，。；：！？]+$/, ''); } catch { return match; }
+    if (!token || (!match.startsWith('@"') && token.startsWith('{'))) return match;
+    try { const target = tools.path(token); if (!fs.existsSync(target)) return match; return fileBlock(token, tools, false); } catch { return match; }
   });
 }
 export async function expand(command: CustomCommand, args: string, tools: Tools, display: Display = noop): Promise<string> {

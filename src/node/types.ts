@@ -11,7 +11,8 @@ export interface Message { role: 'user' | 'assistant' | 'tool'; content: string;
 export interface ToolSpec { name: string; description: string; input_schema: any }
 export interface Result { status: string; text: string; reason?: string; turns?: number; session: string; usage?: {input: number; output: number} }
 export type Display = (kind: string, text: string) => void;
-export type Confirm = (name: string, detail: string) => boolean | Promise<boolean>;
+export type ApprovalDecision = boolean | 'session_edits';
+export type Confirm = (name: string, detail: string) => ApprovalDecision | Promise<ApprovalDecision>;
 export interface ProviderLike {
   complete(system: string, messages: Message[], tools: ToolSpec[], onText?: (text: string) => void, signal?: AbortSignal): Promise<Reply>;
   close(): void | Promise<void>;

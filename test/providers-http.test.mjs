@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import fs from 'node:fs';
 import { once } from 'node:events';
 import { fixture, nodeCommand } from './helpers.mjs';
 import { Provider } from '../dist/providers.js';
@@ -78,3 +79,116 @@ test('已经显示流式文本后网络失败不重试', async t => {
   const f = await fixture(t, {config: {provider: 'openai', api_key: 'local', model: 'local', base_url: base + '/v1', stream: true, timeout: 3}});
   const displayed = []; f.engine.display = (kind, text) => displayed.push([kind, text]); assert.equal((await f.engine.run('请求')).status, 'error'); assert.equal(count, 1); assert.equal(displayed.find(([kind]) => kind === 'stream')[1], 'partial');
 });
+for (const stream of [false, true]) test(`Anthropic ${stream ? 'SSE' : 'HTTP'} 拒绝响应显示原因，不当作空回复、不重试或执行工具`, async t => {
+  let requests = 0;
+  const base = await serve(t, async (_, req, res) => {
+    requests++;
+    const detail = {type: 'refusal', category: 'cyber', explanation: 'Gateway blocked local-test-secret.'};
+    const message = {id: 'msg_refusal', type: 'message', role: 'assistant', model: 'local-test', content: [],
+      stop_reason: 'refusal', stop_sequence: null, stop_details: detail, usage: {input_tokens: 0, output_tokens: 0}};
+    res.writeHead(200, {'content-type': stream ? 'text/event-stream' : 'application/json'});
+    if (!stream) res.end(JSON.stringify(message));
+    else {
+      const events = [{type: 'message_start', message: {...message, stop_reason: null, stop_details: undefined}},
+        {type: 'message_delta', delta: {stop_reason: 'refusal', stop_sequence: null, stop_details: detail}, usage: {output_tokens: 0}}, {type: 'message_stop'}];
+      res.end(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''));
+    }
+  });
+  const f = await fixture(t, {config: {provider: 'anthropic', stream, api_key: 'local-test-secret', model: 'local-test', base_url: base, timeout: 3}});
+  const result = await f.engine.run('hi');
+  assert.equal(result.status, 'error'); assert.match(result.reason, /模型服务拒绝了请求/); assert.match(result.reason, /stop_reason=refusal；category=cyber/);
+  assert.match(result.reason, /REDACTED/); assert.ok(!result.reason.includes('local-test-secret'));
+  assert.ok(!result.reason.includes('模型返回空回复')); assert.equal(requests, 1);
+  assert.equal(f.engine.messages.length, 1); assert.deepEqual(f.store.data.changes, []);
+});
+
+function payload(provider, index, action, stream) {
+  return provider === 'anthropic' ? anthropic(index, action, stream) : openai(index, action, stream);
+}
+function gatewayTimeout(provider, res, partial = false) {
+  res.writeHead(200, {'content-type': 'text/event-stream'});
+  if (partial) {
+    const body = payload(provider, 0, undefined, true);
+    const end = body.indexOf(provider === 'anthropic' ? 'event: content_block_stop' : 'data: [DONE]');
+    res.write(body.slice(0, end));
+  }
+  const error = JSON.stringify({type: 'error', error: {type: 'timeout_error', message: 'Request timed out.'}});
+  res.end((provider === 'anthropic' ? 'event: error\n' : '') + `data: ${error}\n\n`);
+}
+for (const provider of ['anthropic', 'openai']) {
+  for (const failure of ['timeout', 'reset']) test(`${provider} SDK ${failure} 的 name 为 Error 时仍重试，并显示进度`, async t => {
+    let count = 0;
+    const base = await serve(t, async (_, req, res) => {
+      if (++count === 1) { if (failure === 'reset') req.socket.destroy(); return; }
+      res.writeHead(200, {'content-type': 'application/json'}); res.end(payload(provider, 0, undefined, false));
+    });
+    const f = await fixture(t, {config: {provider, api_key: 'local', model: 'local', base_url: base, stream: false, timeout: 0.5}});
+    const displayed = []; f.engine.display = (kind, text) => displayed.push([kind, text]);
+    const result = await f.engine.run('请求'); assert.equal(result.status, 'completed', result.reason); assert.equal(count, 2);
+    assert.ok(displayed.some(([kind, text]) => kind === 'thinking' && /第 2\/3 次/.test(text)));
+  });
+  test(`${provider} SSE 网关超时重试耗尽后保留工具结果，继续时沿用历史`, async t => {
+    const requests = [];
+    const base = await serve(t, async (data, _, res) => {
+      requests.push(data);
+      if (requests.length >= 2 && requests.length <= 4) { gatewayTimeout(provider, res); return; }
+      res.writeHead(200, {'content-type': 'text/event-stream'});
+      res.end(payload(provider, requests.length, requests.length === 1 ? ['list_files', {pattern: '**/*'}] : undefined, true));
+    });
+    const f = await fixture(t, {config: {provider, api_key: 'local', model: 'local', base_url: base, stream: true, timeout: 5}});
+    f.write('keep.txt', 'evidence');
+    const failed = await f.engine.run('分析项目'); assert.equal(failed.status, 'error');
+    assert.match(failed.reason, /模型服务返回超时.*已尝试 3 次/); assert.match(failed.reason, /本机超时设置 5 秒/);
+    assert.match(failed.reason, /已保存会话和已完成的工具结果/); assert.match(failed.reason, /继续/);
+    assert.equal(requests.length, 4); const before = structuredClone(f.engine.messages);
+    assert.equal(before.filter(m => m.role === 'tool').length, 1); assert.match(before.at(-1).content, /keep\.txt/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(f.store.path, 'utf8')).messages, before);
+    const resumed = await f.engine.run('继续'); assert.equal(resumed.status, 'completed', resumed.reason);
+    assert.deepEqual(f.engine.messages.slice(0, before.length), before); assert.equal(f.engine.messages.filter(m => m.role === 'tool').length, 1);
+    const wire = requests.at(-1).messages;
+    assert.ok(provider === 'openai' ? wire.some(m => m.role === 'tool' && /keep\.txt/.test(m.content))
+      : wire.some(m => m.content.some(b => b.type === 'tool_result' && /keep\.txt/.test(b.content))));
+    assertProtocol(f.engine.messages);
+  });
+  test(`${provider} 已显示文字后的网关超时不自动重试`, async t => {
+    let count = 0;
+    const base = await serve(t, async (_, req, res) => { count++; gatewayTimeout(provider, res, true); });
+    const f = await fixture(t, {config: {provider, api_key: 'local', model: 'local', base_url: base, stream: true, timeout: 5}});
+    const displayed = []; f.engine.display = (kind, text) => displayed.push([kind, text]);
+    const result = await f.engine.run('请求'); assert.equal(result.status, 'error'); assert.equal(count, 1);
+    assert.match(result.reason, /已尝试 1 次/); assert.ok(displayed.some(([kind, text]) => kind === 'stream' && text));
+    assert.equal(f.engine.messages.length, 1); assertProtocol(f.engine.messages);
+  });
+  test(`${provider} 兼容网关只有 Request timed out 文本的 SSE 错误也能重试`, async t => {
+    let count = 0;
+    const base = await serve(t, async (_, req, res) => {
+      res.writeHead(200, {'content-type': 'text/event-stream'});
+      if (++count === 1) res.end((provider === 'anthropic' ? 'event: error\n' : '') + 'data: {"error":{"message":"Request timed out."}}\n\n');
+      else res.end(payload(provider, 0, undefined, true));
+    });
+    const f = await fixture(t, {config: {provider, api_key: 'local', model: 'local', base_url: base, stream: true, timeout: 5}});
+    assert.equal((await f.engine.run('请求')).status, 'completed'); assert.equal(count, 2);
+  });
+  for (const stream of [false, true]) test(`${provider} ${stream ? 'SSE' : 'HTTP'} 鉴权错误即使包含 timeout 也不重试`, async t => {
+    let count = 0;
+    const base = await serve(t, async (_, req, res) => {
+      count++; res.writeHead(stream ? 200 : 401, {'content-type': stream ? 'text/event-stream' : 'application/json'});
+      const error = JSON.stringify({type: 'error', error: {type: stream ? 'authentication_error' : 'timeout_error', message: 'Request timed out.'}});
+      res.end(stream ? (provider === 'anthropic' ? 'event: error\n' : '') + `data: ${error}\n\n` : error);
+    });
+    const f = await fixture(t, {config: {provider, api_key: 'local', model: 'local', base_url: base, stream, timeout: 5}});
+    const result = await f.engine.run('请求'); assert.equal(result.status, 'error'); assert.equal(count, 1);
+    assert.match(result.reason, stream ? /Request timed out/ : /401/); assert.ok(!result.reason.includes('模型服务返回超时'));
+  });
+  test(`${provider} 重试等待期间可以中断，后续回合仍能请求`, async t => {
+    let count = 0;
+    const base = await serve(t, async (_, req, res) => {
+      if (++count === 1) { gatewayTimeout(provider, res); return; }
+      res.writeHead(200, {'content-type': 'text/event-stream'}); res.end(payload(provider, 0, undefined, true));
+    });
+    const f = await fixture(t, {config: {provider, api_key: 'local', model: 'local', base_url: base, stream: true, timeout: 5}});
+    f.engine.display = (kind, text) => { if (kind === 'thinking' && /第 2\/3 次/.test(text)) f.engine.cancel(); };
+    assert.equal((await f.engine.run('请求')).status, 'cancelled'); assert.equal(count, 1);
+    assert.equal((await f.engine.run('继续')).status, 'completed'); assert.equal(count, 2);
+  });
+}

@@ -118,7 +118,7 @@ test('连接自动获取模型，通过 /model 编号选择并保存，首次推
     json(res, {choices: [{message: {content: 'done'}, finish_reason: 'stop'}]});
   });
   const f = await fixture(t); const display = []; f.engine.display = (kind, text) => display.push(text);
-  await connectModel(f.engine, answers('secret-only', base + '/v1/chat/completions', ''), 'openai');
+  await connectModel(f.engine, answers(base + '/v1/chat/completions', 'secret-only', ''), 'openai');
   assert.equal(f.config.model, ''); assert.equal(f.config.base_url, base + '/v1'); assert.match(display.join('\n'), /1\. model-a/);
   const listed = await command('/model list', f.config, f.store, f.engine); assert.match(listed, /2\. model-b/);
   const selected = await command('/model', f.config, f.store, f.engine, undefined, answers('2')); assert.match(selected, /model-b/);
@@ -132,7 +132,7 @@ test('连接自动获取模型，通过 /model 编号选择并保存，首次推
 test('连接时可直接按编号选型，空列表仍能手动选择', async t => {
   const f = await fixture(t);
   f.engine.modelCatalog = new ModelCatalog(async () => [{id: 'one'}, {id: 'two'}]);
-  await connectModel(f.engine, answers('secret-only', '', '2'), 'openai'); assert.equal(f.config.model, 'two');
+  await connectModel(f.engine, answers('', 'secret-only', '2'), 'openai'); assert.equal(f.config.model, 'two');
   f.engine.modelCatalog = new ModelCatalog(async () => []);
   await chooseModel(f.engine, answers('manual')); assert.equal(f.config.model, 'manual');
 });

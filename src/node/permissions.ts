@@ -8,13 +8,16 @@ export function checkCommand(command: string): void {
   }
 }
 export class Policy {
+  allowSessionEdits = false;
   constructor(public mode: Mode = 'edit', public confirm: Confirm = () => false) {
     if (!['plan', 'ask', 'edit', 'auto'].includes(mode)) throw new Error('无效权限模式');
   }
   async authorize(name: string, detail = ''): Promise<void> {
     if (READ.has(name)) return;
     if (this.mode === 'plan') throw new Error(`plan 模式禁止 ${name}；请由用户通过 /mode 切换`);
-    if (this.mode === 'auto' || (this.mode === 'edit' && WRITE.has(name))) return;
-    if (!await this.confirm(name, detail)) throw new Error(`用户未批准 ${name}；请调整方案，不要重复相同调用`);
+    if (this.mode === 'auto' || (WRITE.has(name) && (this.mode === 'edit' || this.allowSessionEdits))) return;
+    const decision = await this.confirm(name, detail);
+    if (decision === 'session_edits' && WRITE.has(name)) { this.allowSessionEdits = true; return; }
+    if (decision !== true) throw new Error(`用户未批准 ${name}；请调整方案，不要重复相同调用`);
   }
 }

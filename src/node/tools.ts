@@ -24,7 +24,8 @@ export function globMatch(relative: string, pattern: string): boolean {
   }
   return new RegExp('^' + regex + '$', 'u').test(relative);
 }
-function ignoreMatch(relative: string, pattern: string): boolean {
+export const DISCOVERY_SKIPPED = new Set(['.git', '.venv', 'venv', 'node_modules', '__pycache__', '.idea', '.edacode', 'dist', 'build', '.pytest_cache']);
+export function ignoreMatch(relative: string, pattern: string): boolean {
   const p = pattern.replace(/\/$/, ''); return relative.startsWith(p + '/') || globMatch(relative, pattern.replaceAll('*', '**'));
 }
 export function validate(value: any, schema: any, label = 'args'): void {
@@ -131,7 +132,7 @@ export class Tools {
     return `${value} | sha256=${digest(data)} | 共 ${lines.length} 行\n` + lines.slice(offset - 1, offset - 1 + limit).map((line, i) => `${String(i + offset).padStart(5)} | ${line}`).join('\n') + this.instructions(target);
   }
   *files(pattern = '**/*'): Generator<string> {
-    const skipped = new Set(['.git', '.venv', 'venv', 'node_modules', '__pycache__', '.idea', '.edacode', 'dist', 'build', '.pytest_cache']);
+    const skipped = DISCOVERY_SKIPPED;
     let ignored: string[] = []; try { ignored = this.bytes(this.path('.edacodeignore')).toString('utf8').split(/\r?\n/).map(x => x.trim()).filter(x => x && !x.startsWith('#')); } catch {}
     const queue = [this.root]; let count = 0;
     while (queue.length) {

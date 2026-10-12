@@ -44,5 +44,6 @@ test('home 缩写仅替换完整路径前缀，终端控制码清理', () => {
 test('CLI 参数保持兼容并验证冲突', () => {
   assert.deepEqual(parseArgs(['--resume']).resume, 'latest'); assert.equal(parseArgs(['--resume=id']).resume, 'id'); assert.equal(parseArgs(['-p', 'task', '--json']).no_stream, true);
   assert.equal(parseArgs(['--workspace=/tmp', 'hello', 'world']).query.join(' '), 'hello world');
+  assert.equal(parseArgs(['--no-tui']).no_tui, true);
   for (const args of [['--json'], ['-p', 'task', 'other'], ['--workspace'], ['--unknown'], ['--json=true']]) assert.throws(() => parseArgs(args));
 });

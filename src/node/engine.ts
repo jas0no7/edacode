@@ -4,7 +4,7 @@ import lockfile from 'proper-lockfile';
 import { BASE_SYSTEM } from './constants.js';
 import { assertProtocol, compact, excerpt, serialized } from './context.js';
 import { Policy } from './permissions.js';
-import { makeProvider } from './providers.js';
+import { makeProvider, ModelRequestTimeoutError } from './providers.js';
 import { ModelCatalog } from './models.js';
 import { Store, atomicWrite, digest, encode, projectRoot, now } from './storage.js';
 import { Tools } from './tools.js';
@@ -63,7 +63,7 @@ export class Engine {
   messages: Message[]; hooks = new Hooks(); controller: AbortController; turns = 0; latestRequest = ''; child: boolean;
   modelCatalog = new ModelCatalog();
   constructor(public config: Config, public store: Store, options: EngineOptions = {}) {
-    this.display = options.display || noop; this.provider = options.provider || makeProvider(config); this.memory = new Memory(config);
+    this.display = options.display || noop; this.provider = options.provider || makeProvider(config, message => this.display('thinking', message)); this.memory = new Memory(config);
     this.evaluator = new GoalEvaluator(this.provider, reply => this.recordUsage(reply)); this.child = options.child || false;
     this.policy = new Policy(this.child ? 'plan' : config.mode, options.confirm); this.tools = new Tools(config, store, this.policy, this.display, this.child);
     if (!this.child) this.tools.delegateHandler = tasks => this.delegate(tasks);
@@ -80,7 +80,7 @@ export class Engine {
   async connect(connection: Pick<Config, 'provider' | 'model' | 'api_key' | 'base_url'>): Promise<void> {
     const previous = this.provider;
     Object.assign(this.config, connection);
-    this.provider = makeProvider(this.config);
+    this.provider = makeProvider(this.config, message => this.display('thinking', message));
     this.evaluator.provider = this.provider;
     await previous.close?.();
   }
@@ -163,6 +163,7 @@ export class Engine {
         }
         this.messages.push(reply.message()); this.store.save(); this.store.event('assistant', {content: reply.text, calls: reply.calls}); final = reply.text;
         if (!streamed && final) this.display('assistant', final);
+        if (final) this.display('assistant_phase', reply.calls.length ? 'progress' : 'final');
         if (['length', 'max_tokens'].includes(reply.stop)) {
           for (const call of reply.calls) this.toolResult(call, '模型输出被截断，此调用未执行。请减小输出规模。', true);
           return this.result('limit', final, '模型达到 max_tokens，未宣称任务完成；请提高输出限额或缩小任务');
@@ -187,7 +188,8 @@ export class Engine {
         await this.tools.cancelRunning();
         return this.result('cancelled', final, '已中断当前回合并保存会话；未确认的工具不会自动重放');
       }
-      const reason = this.errorText(error); this.store.event('error', {error: reason}); return this.result('error', final, reason);
+      const reason = this.errorText(error) + (error instanceof ModelRequestTimeoutError ? '\n已保存会话和已完成的工具结果；输入“继续”可接着处理，无需重新开始。' : '');
+      this.store.event('error', {error: reason}); return this.result('error', final, reason);
     }
   }
   private toolResult(call: Call, output: string, error: boolean): void {
